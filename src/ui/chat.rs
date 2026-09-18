@@ -408,41 +408,33 @@ fn tool_lines(
 ) -> Vec<Line<'static>> {
     let th = app.theme;
     let mut rows = vec![Line::from("")];
-    let (glyph, st) = match status {
-        ToolStatus::Running => (app.spinner().to_string(), th.warn()),
-        ToolStatus::Ok => ("✓".into(), th.success()),
-        ToolStatus::Failed => ("✗".into(), th.error()),
-        ToolStatus::Denied => ("⊘".into(), th.mute()),
-    };
     let canon = crate::tools::canonicalize(name);
     let is_edit = matches!(canon, "write" | "edit" | "multiedit" | "lsp_replace_symbol");
-    let label = match canon {
-        "bash" => format!("Run {}", truncate_width(detail, width.saturating_sub(12))),
-        "view" => format!("View {}", truncate_width(detail, width.saturating_sub(12))),
-        "write" | "edit" | "multiedit" => {
-            format!("Edit {}", truncate_width(detail, width.saturating_sub(12)))
-        }
-        other => format!(
-            "{other} {}",
-            truncate_width(detail, width.saturating_sub(other.len() + 8))
-        ),
+    let kind = match canon {
+        "bash" => "Run",
+        "view" => "View",
+        "write" | "edit" | "multiedit" => "Edit",
+        other => other,
     };
-    let bullet = if status == ToolStatus::Running {
-        glyph
-    } else if canon == "view" {
-        "◈".into()
-    } else {
-        "◆".into()
+    let mark = match status {
+        ToolStatus::Running => app.spinner().to_string(),
+        ToolStatus::Failed => "✗".into(),
+        ToolStatus::Denied => "⊘".into(),
+        ToolStatus::Ok if canon == "view" => "◈".into(),
+        ToolStatus::Ok => "◆".into(),
     };
-    let title_st = if is_edit && status == ToolStatus::Ok {
-        th.success()
-    } else {
-        st
+    let mark_st = match status {
+        ToolStatus::Running => th.warn(),
+        ToolStatus::Failed => th.error(),
+        ToolStatus::Denied => th.mute(),
+        ToolStatus::Ok => th.dim(),
     };
-    rows.push(Line::from(Span::styled(
-        format!("    {bullet} {label}"),
-        title_st,
-    )));
+    let path = truncate_width(detail, width.saturating_sub(kind.len() + 10));
+    rows.push(Line::from(vec![
+        Span::styled(format!("    {mark} "), mark_st),
+        Span::styled(format!("{kind} "), th.base()),
+        Span::styled(path, th.success()),
+    ]));
     if !folded && !output.is_empty() {
         if is_edit {
             if let Some(hunk) = crate::tools::parse_edit_diff(output) {
@@ -481,7 +473,12 @@ fn diff_rows(hunk: &[(char, u32, String)], width: usize, th: Theme) -> Vec<Line<
             '-' => (th.diff_del_bg, th.fg),
             _ => (th.bg, th.fg),
         };
-        let num_st = Style::default().fg(th.fg_dim).bg(bg);
+        let num_fg = match tag {
+            '+' => th.green,
+            '-' => th.red,
+            _ => th.fg_dim,
+        };
+        let num_st = Style::default().fg(num_fg).bg(th.bg);
         let body_st = Style::default().fg(fg).bg(bg);
         let body = truncate_width(text, width.saturating_sub(8));
         let prefix = format!("  {num:>4} ");

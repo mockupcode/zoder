@@ -54,8 +54,8 @@ impl Theme {
             red: Color::Rgb(247, 118, 142),
             orange: Color::Rgb(255, 158, 100),
             md: Color::Rgb(154, 189, 245),
-            diff_del_bg: Color::Rgb(66, 14, 20),
-            diff_ins_bg: Color::Rgb(6, 56, 6),
+            diff_del_bg: Color::Rgb(73, 8, 18),
+            diff_ins_bg: Color::Rgb(0, 57, 0),
             cursor: Color::Rgb(200, 200, 200),
         }
     }
