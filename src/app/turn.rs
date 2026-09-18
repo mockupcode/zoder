@@ -278,7 +278,7 @@ impl App {
     }
 
     pub(super) fn open_sessions(&mut self) {
-        self.sessions = Session::list(&self.session.cwd);
+        self.sessions = Session::list_all();
         self.overlay = Overlay::Sessions(SessionsOverlay::open());
     }
 
@@ -317,7 +317,7 @@ impl App {
         };
         let current = self.session.id == meta.id;
         if Session::delete(&meta.path).is_ok() {
-            self.sessions = Session::list(&self.session.cwd);
+            self.sessions = Session::list_all();
             if current {
                 self.overlay = Overlay::None;
                 self.new_session();

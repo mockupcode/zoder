@@ -153,23 +153,43 @@ impl Config {
     }
 }
 
-/// Global config / install dir (`~/.zoder`). Override with `ZODER_HOME`.
+/// Config, install bin, and sessions (`~/.zoder`). Override with `ZODER_HOME`.
 pub fn home_dir() -> PathBuf {
     if let Ok(p) = std::env::var("ZODER_HOME") {
         return PathBuf::from(p);
     }
+    #[cfg(test)]
+    {
+        return test_home();
+    }
+    #[allow(unreachable_code)]
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".zoder")
 }
 
-pub fn config_path() -> Option<PathBuf> {
-    Some(home_dir().join("config.toml"))
+#[cfg(test)]
+fn test_home() -> PathBuf {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!("zoder-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&p);
+        p
+    })
+    .clone()
 }
 
-/// Sessions, plan.md, and todos for the open project.
+pub fn config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".zoder").join("config.toml"))
+}
+
 pub fn sessions_root(cwd: &Path) -> PathBuf {
-    cwd.join(".zoder").join("sessions")
+    home_dir().join("sessions").join(encode_cwd(cwd))
+}
+
+pub fn encode_cwd(cwd: &Path) -> String {
+    cwd.to_string_lossy().replace('/', "%2F")
 }
 
 pub fn normalize_host(host: &str) -> String {
@@ -195,12 +215,10 @@ mod tests {
     }
 
     #[test]
-    fn sessions_live_in_the_project() {
-        let cwd = Path::new("/Users/demo/proj");
-        assert_eq!(
-            sessions_root(cwd),
-            PathBuf::from("/Users/demo/proj/.zoder/sessions")
-        );
+    fn cwd_encode_is_flat() {
+        let s = encode_cwd(Path::new("/Users/demo/proj"));
+        assert!(!s.contains('/'), "{s}");
+        assert!(s.contains("%2F"));
     }
 
     #[test]

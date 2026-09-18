@@ -27,9 +27,7 @@ GitHub Actions builds `macos-aarch64`, `macos-x86_64`, `linux-x86_64`, and `linu
 
 ## Config
 
-Copy `config.example.toml` to `~/.zoder/config.toml`. Hosts and models stay on the machine, not in this repo.
-
-Sessions, plans, and todos for the open project live in `{project}/.zoder/` (gitignored). `~/.zoder` holds only global config and the installed binary.
+Copy `config.example.toml` to `~/.zoder/config.toml`. Hosts and models stay on the machine, not in this repo. Sessions live under `~/.zoder/sessions/`.
 
 ## Build from source
 

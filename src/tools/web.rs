@@ -208,7 +208,7 @@ pub async fn fetch(args: &Value) -> (bool, String) {
     }
 }
 
-pub async fn web_fetch(session: &Session, args: &Value) -> (bool, String) {
+pub async fn web_fetch(_session: &Session, args: &Value) -> (bool, String) {
     let Some(url) = arg_str(args, "url") else {
         return (false, "url is required".into());
     };
@@ -220,7 +220,7 @@ pub async fn web_fetch(session: &Session, args: &Value) -> (bool, String) {
                 body
             };
             if content.len() > 50_000 {
-                let dir = session.cwd.join(".zoder");
+                let dir = crate::config::home_dir().join("cache");
                 let _ = std::fs::create_dir_all(&dir);
                 let path = dir.join("page.md");
                 if let Err(e) = std::fs::write(&path, &content) {
