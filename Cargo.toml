@@ -27,5 +27,8 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+xkbcommon-dl = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

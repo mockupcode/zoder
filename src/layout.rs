@@ -22,10 +22,7 @@ pub fn to_latin(c: char) -> Option<char> {
         return None;
     }
     let mut guard = CACHE.lock().ok()?;
-    let stale = guard
-        .as_ref()
-        .map(|c| c.at.elapsed() > TTL)
-        .unwrap_or(true);
+    let stale = guard.as_ref().map(|c| c.at.elapsed() > TTL).unwrap_or(true);
     if stale {
         *guard = Some(Cache {
             at: Instant::now(),
@@ -45,7 +42,12 @@ fn probe_layout() -> HashMap<char, char> {
     macos::probe()
 }
 
-#[cfg(all(not(target_os = "macos"), not(test)))]
+#[cfg(all(target_os = "linux", not(test)))]
+fn probe_layout() -> HashMap<char, char> {
+    linux::probe()
+}
+
+#[cfg(all(not(any(target_os = "macos", target_os = "linux")), not(test)))]
 fn probe_layout() -> HashMap<char, char> {
     HashMap::new()
 }
@@ -147,8 +149,7 @@ mod macos {
                 if status != 0 || len < 1 {
                     continue;
                 }
-                if let Some(Ok(ch)) =
-                    char::decode_utf16(buf[..len as usize].iter().copied()).next()
+                if let Some(Ok(ch)) = char::decode_utf16(buf[..len as usize].iter().copied()).next()
                 {
                     if ch != latin && !ch.is_ascii_control() {
                         out.insert(ch, latin);
@@ -156,6 +157,120 @@ mod macos {
                 }
             }
             CFRelease(source);
+        }
+        out
+    }
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+mod linux {
+    use super::*;
+    use std::ffi::CString;
+    use std::ptr;
+
+    use xkbcommon_dl::{xkb_keymap_compile_flags, xkb_rule_names, xkbcommon_option, XkbCommon};
+
+    fn current_layout() -> String {
+        if let Ok(l) = std::env::var("XKB_DEFAULT_LAYOUT") {
+            let first = l.split(',').next().unwrap_or("").trim();
+            if !first.is_empty() {
+                return first.to_string();
+            }
+        }
+        if let Ok(raw) = std::fs::read_to_string("/etc/default/keyboard") {
+            for line in raw.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("XKBLAYOUT=") {
+                    let v = rest.trim().trim_matches('"').trim_matches('\'');
+                    let first = v.split(',').next().unwrap_or("").trim();
+                    if !first.is_empty() {
+                        return first.to_string();
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    fn utf32(xkb: &XkbCommon, state: *mut xkbcommon_dl::xkb_state, kc: u32) -> Option<char> {
+        let n = unsafe { (xkb.xkb_state_key_get_utf32)(state, kc) };
+        char::from_u32(n).filter(|c| !c.is_ascii_control() && *c != '\0')
+    }
+
+    pub fn probe() -> HashMap<char, char> {
+        let mut out = HashMap::new();
+        let Some(xkb) = xkbcommon_option() else {
+            return out;
+        };
+        let layout = current_layout();
+        if layout.is_empty() || layout == "us" {
+            return out;
+        }
+        let Ok(layout_c) = CString::new(layout) else {
+            return out;
+        };
+        let us_c = CString::new("us").expect("us");
+        unsafe {
+            let ctx = (xkb.xkb_context_new)(xkbcommon_dl::xkb_context_flags::empty());
+            if ctx.is_null() {
+                return out;
+            }
+            let cur_names = xkb_rule_names {
+                rules: ptr::null(),
+                model: ptr::null(),
+                layout: layout_c.as_ptr(),
+                variant: ptr::null(),
+                options: ptr::null(),
+            };
+            let us_names = xkb_rule_names {
+                rules: ptr::null(),
+                model: ptr::null(),
+                layout: us_c.as_ptr(),
+                variant: ptr::null(),
+                options: ptr::null(),
+            };
+            let flags = xkb_keymap_compile_flags::empty();
+            let cur_map = (xkb.xkb_keymap_new_from_names)(ctx, &cur_names, flags);
+            let us_map = (xkb.xkb_keymap_new_from_names)(ctx, &us_names, flags);
+            if cur_map.is_null() || us_map.is_null() {
+                if !cur_map.is_null() {
+                    (xkb.xkb_keymap_unref)(cur_map);
+                }
+                if !us_map.is_null() {
+                    (xkb.xkb_keymap_unref)(us_map);
+                }
+                (xkb.xkb_context_unref)(ctx);
+                return out;
+            }
+            let cur_state = (xkb.xkb_state_new)(cur_map);
+            let us_state = (xkb.xkb_state_new)(us_map);
+            if !cur_state.is_null() && !us_state.is_null() {
+                let min = (xkb.xkb_keymap_min_keycode)(cur_map);
+                let max = (xkb.xkb_keymap_max_keycode)(cur_map);
+                for kc in min..=max {
+                    let Some(us) = utf32(xkb, us_state, kc) else {
+                        continue;
+                    };
+                    if !us.is_ascii_lowercase() {
+                        continue;
+                    }
+                    let Some(cur) = utf32(xkb, cur_state, kc) else {
+                        continue;
+                    };
+                    if cur != us {
+                        out.insert(cur, us);
+                    }
+                }
+            }
+            if !cur_state.is_null() {
+                (xkb.xkb_state_unref)(cur_state);
+            }
+            if !us_state.is_null() {
+                (xkb.xkb_state_unref)(us_state);
+            }
+            (xkb.xkb_keymap_unref)(cur_map);
+            (xkb.xkb_keymap_unref)(us_map);
+            (xkb.xkb_context_unref)(ctx);
         }
         out
     }

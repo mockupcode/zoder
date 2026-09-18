@@ -704,7 +704,10 @@ mod tests {
         if crate::layout::to_latin('แ') == Some('c') {
             app.composer.insert_str("draft");
             app.handle_key(KeyEvent::new(KeyCode::Char('แ'), KeyModifiers::CONTROL));
-            assert!(app.composer.is_empty(), "physical C under the active layout");
+            assert!(
+                app.composer.is_empty(),
+                "physical C under the active layout"
+            );
         }
     }
 }
