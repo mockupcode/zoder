@@ -225,6 +225,16 @@ pub fn resolve(cwd: &Path, p: &str) -> PathBuf {
     }
 }
 
+fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(Value::as_str)
+}
+
+fn arg_path(session: &Session, args: &Value) -> Result<PathBuf, String> {
+    arg_str(args, "path")
+        .map(|p| resolve(&session.cwd, p))
+        .ok_or_else(|| "path is required".into())
+}
+
 pub async fn execute(session: &mut Session, name: &str, args: &Value) -> (bool, String) {
     match name {
         "read_file" => read_file(session, args),
@@ -240,9 +250,9 @@ pub async fn execute(session: &mut Session, name: &str, args: &Value) -> (bool, 
 }
 
 fn read_file(session: &Session, args: &Value) -> (bool, String) {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => resolve(&session.cwd, p),
-        None => return (false, "path is required".into()),
+    let path = match arg_path(session, args) {
+        Ok(p) => p,
+        Err(e) => return (false, e),
     };
     let offset = args
         .get("offset")
@@ -275,11 +285,11 @@ fn read_file(session: &Session, args: &Value) -> (bool, String) {
 }
 
 fn write_file(session: &Session, args: &Value) -> (bool, String) {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => resolve(&session.cwd, p),
-        None => return (false, "path is required".into()),
+    let path = match arg_path(session, args) {
+        Ok(p) => p,
+        Err(e) => return (false, e),
     };
-    let contents = args.get("contents").and_then(|v| v.as_str()).unwrap_or("");
+    let contents = arg_str(args, "contents").unwrap_or("");
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return (false, e.to_string());
@@ -295,18 +305,12 @@ fn write_file(session: &Session, args: &Value) -> (bool, String) {
 }
 
 fn search_replace(session: &Session, args: &Value) -> (bool, String) {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => resolve(&session.cwd, p),
-        None => return (false, "path is required".into()),
+    let path = match arg_path(session, args) {
+        Ok(p) => p,
+        Err(e) => return (false, e),
     };
-    let old = args
-        .get("old_string")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let new = args
-        .get("new_string")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let old = arg_str(args, "old_string").unwrap_or("");
+    let new = arg_str(args, "new_string").unwrap_or("");
     let all = args
         .get("replace_all")
         .and_then(|v| v.as_bool())
@@ -343,20 +347,17 @@ fn search_replace(session: &Session, args: &Value) -> (bool, String) {
 }
 
 fn grep(session: &Session, args: &Value) -> (bool, String) {
-    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return (false, "pattern is required".into()),
+    let Some(pattern) = arg_str(args, "pattern") else {
+        return (false, "pattern is required".into());
     };
     let re = match RegexBuilder::new(pattern).case_insensitive(true).build() {
         Ok(r) => r,
         Err(e) => return (false, e.to_string()),
     };
-    let root = args
-        .get("path")
-        .and_then(|v| v.as_str())
+    let root = arg_str(args, "path")
         .map(|p| resolve(&session.cwd, p))
         .unwrap_or_else(|| session.cwd.clone());
-    let glob = args.get("glob").and_then(|v| v.as_str());
+    let glob = arg_str(args, "glob");
     let mut hits = Vec::new();
     let walker = WalkBuilder::new(&root)
         .hidden(false)
@@ -396,7 +397,7 @@ fn grep(session: &Session, args: &Value) -> (bool, String) {
 }
 
 fn glob_files(session: &Session, args: &Value) -> (bool, String) {
-    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
+    let pattern = arg_str(args, "pattern").unwrap_or("*");
     let mut hits = Vec::new();
     for ent in WalkBuilder::new(&session.cwd)
         .git_ignore(true)
@@ -435,9 +436,7 @@ fn glob_files(session: &Session, args: &Value) -> (bool, String) {
 }
 
 fn list_dir(session: &Session, args: &Value) -> (bool, String) {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
+    let path = arg_str(args, "path")
         .map(|p| resolve(&session.cwd, p))
         .unwrap_or_else(|| session.cwd.clone());
     let rd = match std::fs::read_dir(&path) {
@@ -468,9 +467,8 @@ fn list_dir(session: &Session, args: &Value) -> (bool, String) {
 }
 
 async fn bash(session: &Session, args: &Value) -> (bool, String) {
-    let command = match args.get("command").and_then(|v| v.as_str()) {
-        Some(c) => c,
-        None => return (false, "command is required".into()),
+    let Some(command) = arg_str(args, "command") else {
+        return (false, "command is required".into());
     };
     let timeout = Duration::from_millis(
         args.get("timeout_ms")
@@ -663,11 +661,7 @@ pub fn list_at_level(cwd: &Path, query: &str, limit: usize) -> Vec<FileHit> {
             format!("{dir_rel}{name}")
         };
         let hit = FileHit {
-            label: if is_dir {
-                format!("{name}/")
-            } else {
-                name
-            },
+            label: if is_dir { format!("{name}/") } else { name },
             rel,
             is_dir,
         };

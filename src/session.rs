@@ -475,10 +475,7 @@ mod tests {
             cwd: PathBuf::from("/Users/a/Develop/tycoon"),
         };
         let list = Session::grouped(vec![&z, &a, &t], true);
-        let labels: Vec<String> = list
-            .iter()
-            .map(|s| Session::group_label(&s.cwd))
-            .collect();
+        let labels: Vec<String> = list.iter().map(|s| Session::group_label(&s.cwd)).collect();
         assert_eq!(
             labels,
             vec![

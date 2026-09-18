@@ -100,7 +100,10 @@ mod tests {
 
     #[test]
     fn subsequence_highlights_as() {
-        assert_eq!(match_indices("always-approve", "as").as_deref(), Some(&[0, 5][..]));
+        assert_eq!(
+            match_indices("always-approve", "as").as_deref(),
+            Some(&[0, 5][..])
+        );
         assert_eq!(match_indices("new", "as"), None);
         assert!(matches("as").iter().any(|c| c.name == "always-approve"));
         assert!(matches("as").iter().all(|c| c.name != "new"));

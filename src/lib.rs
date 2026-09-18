@@ -11,7 +11,7 @@ pub mod tools;
 pub mod ui;
 
 use std::io::{stdout, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use crossterm::event::{
@@ -29,6 +29,11 @@ use tokio::sync::mpsc;
 
 use crate::app::App;
 use crate::config::Config;
+use crate::text::sanitize_input;
+
+/// Fastest redraw the loop will do, so a burst of stream deltas cannot outrun
+/// the terminal.
+const MIN_FRAME: Duration = Duration::from_millis(16);
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -59,10 +64,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     terminal.clear()?;
     let mut events = EventStream::new();
-    let mut ticks = tokio::time::interval(Duration::from_millis(80));
+    let mut ticks = tokio::time::interval(Duration::from_millis(16));
+    let mut last_draw: Option<Instant> = None;
 
     let result = loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        let due = last_draw
+            .map(|t: Instant| t.elapsed() >= MIN_FRAME)
+            .unwrap_or(true);
+        if app.wants_draw() && due {
+            terminal.draw(|f| ui::draw(f, &app))?;
+            app.drawn();
+            last_draw = Some(Instant::now());
+        }
         if app.should_quit {
             app.answer_perm(false);
             break Ok(());
@@ -74,8 +87,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 match maybe {
                     Some(Ok(Event::Key(k))) => app.handle_key(k),
                     Some(Ok(Event::Mouse(m))) => app.handle_mouse(m),
-                    Some(Ok(Event::Resize(_, _))) => {}
-                    Some(Ok(Event::Paste(s))) => app.composer.insert_str(&s),
+                    Some(Ok(Event::Resize(_, _))) => app.touch(),
+                    Some(Ok(Event::Paste(s))) => {
+                        app.composer.insert_str(&sanitize_input(&s));
+                        app.touch();
+                    }
                     Some(Err(e)) => break Err(e.into()),
                     None => break Ok(()),
                     _ => {}
@@ -128,6 +144,25 @@ mod branded_guard {
     use std::fs;
     use std::path::Path;
 
+    fn needles() -> [&'static str; 3] {
+        [
+            concat!("gr", "ok"),
+            concat!("x", "ai"),
+            concat!("space", "x"),
+        ]
+    }
+
+    fn scan_text(label: &str, text: &str, hits: &mut Vec<String>) {
+        for (i, line) in text.lines().enumerate() {
+            let l = line.to_lowercase();
+            for needle in needles() {
+                if l.contains(needle) {
+                    hits.push(format!("{label}:{}:{line}", i + 1));
+                }
+            }
+        }
+    }
+
     fn walk_rs(dir: &Path, hits: &mut Vec<String>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
         for ent in rd.flatten() {
@@ -147,18 +182,7 @@ mod branded_guard {
             let Ok(text) = fs::read_to_string(&p) else {
                 continue;
             };
-            for (i, line) in text.lines().enumerate() {
-                let l = line.to_lowercase();
-                for needle in [
-                    concat!("gr", "ok"),
-                    concat!("x", "ai"),
-                    concat!("space", "x"),
-                ] {
-                    if l.contains(needle) {
-                        hits.push(format!("{}:{}:{line}", p.display(), i + 1));
-                    }
-                }
-            }
+            scan_text(&p.display().to_string(), &text, hits);
         }
     }
 
@@ -167,18 +191,7 @@ mod branded_guard {
         let mut hits = Vec::new();
         walk_rs(Path::new("src"), &mut hits);
         if let Ok(text) = fs::read_to_string("Cargo.toml") {
-            for (i, line) in text.lines().enumerate() {
-                let l = line.to_lowercase();
-                for needle in [
-                    concat!("gr", "ok"),
-                    concat!("x", "ai"),
-                    concat!("space", "x"),
-                ] {
-                    if l.contains(needle) {
-                        hits.push(format!("Cargo.toml:{}:{line}", i + 1));
-                    }
-                }
-            }
+            scan_text("Cargo.toml", &text, &mut hits);
         }
         hits.sort();
         hits.dedup();

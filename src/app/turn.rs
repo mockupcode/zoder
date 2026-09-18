@@ -6,7 +6,7 @@ use crate::composer::DraftKind;
 use crate::session::{AgentMode, Block, Session, SessionMeta, ToolStatus};
 use crate::tools;
 
-use super::{clock, App, Focus, Overlay, Screen};
+use super::{clock, App, Focus, Overlay, Screen, SessionsOverlay};
 
 impl App {
     pub(super) fn submit(&mut self) {
@@ -24,18 +24,8 @@ impl App {
                 return;
             }
         }
-        if let Some(files) = self.at_entries() {
-            if !files.is_empty() {
-                let i = self.file_sel.min(files.len() - 1);
-                if files[i].is_dir {
-                    self.composer.replace_at_query(&files[i].rel);
-                    self.file_sel = 0;
-                } else {
-                    let pick = files[i].rel.clone();
-                    self.composer.replace_at_query(&format!("{pick} "));
-                }
-                return;
-            }
+        if self.confirm_at(true) {
+            return;
         }
 
         if self.composer.kind == DraftKind::Shell {
@@ -85,6 +75,7 @@ impl App {
     }
 
     pub fn send_user(&mut self, text: String) {
+        self.touch();
         self.screen = Screen::Chat;
         if self.running {
             self.queue.push(text);
@@ -114,7 +105,7 @@ impl App {
             .messages
             .push(crate::session::ChatMessage::user(&text));
         self.follow = true;
-        self.scroll = 0;
+        self.scroll.set(0);
         self.start_turn();
         let _ = self.session.save();
     }
@@ -188,9 +179,7 @@ impl App {
                 if rest.is_empty() {
                     self.open_models();
                 } else {
-                    self.cfg.set_model(rest.to_string());
-                    self.client.model = rest.to_string();
-                    self.session.model = rest.to_string();
+                    self.apply_model(rest.to_string());
                     self.toast(format!("model {rest}"));
                 }
             }
@@ -208,7 +197,7 @@ impl App {
                     ));
                 }
             }
-            "help" => self.overlay = Overlay::Help,
+            "help" => self.open_help(),
             "quit" | "exit" => self.should_quit = true,
             _ => self.toast(format!("unknown command /{name}")),
         }
@@ -223,7 +212,7 @@ impl App {
         self.session = Session::new(cwd.clone(), self.cfg.model().to_string());
         self.screen = Screen::Welcome;
         self.composer.clear();
-        self.scroll = 0;
+        self.scroll.set(0);
         self.follow = true;
         self.running = false;
         self.queue.clear();
@@ -233,31 +222,26 @@ impl App {
 
     pub(super) fn open_sessions(&mut self) {
         self.sessions = Session::list_all();
-        self.overlay = Overlay::Sessions {
-            query: String::new(),
-            selected: 0,
-            confirm_delete: false,
-            expanded: true,
-            filter_cwd: false,
-            searching: false,
-        };
+        self.overlay = Overlay::Sessions(SessionsOverlay::open());
+    }
+
+    pub(super) fn open_help(&mut self) {
+        self.overlay = Overlay::Help;
     }
 
     pub fn picker_sessions(&self) -> Vec<&SessionMeta> {
-        let (query, filter_cwd, expanded) = match &self.overlay {
-            Overlay::Sessions {
-                query,
-                filter_cwd,
-                expanded,
-                ..
-            } => (query.as_str(), *filter_cwd, *expanded),
-            _ => return self.sessions.iter().collect(),
+        let Some(s) = self.overlay.sessions() else {
+            return self.sessions.iter().collect();
         };
-        Session::grouped(self.filtered_sessions(query, filter_cwd), expanded)
+        Session::grouped(self.filtered_sessions(&s.query, s.filter_cwd), s.expanded)
+    }
+
+    fn picker_owned(&self) -> Vec<SessionMeta> {
+        self.picker_sessions().into_iter().cloned().collect()
     }
 
     pub(super) fn resume_selected(&mut self, selected: usize) {
-        let list: Vec<SessionMeta> = self.picker_sessions().into_iter().cloned().collect();
+        let list = self.picker_owned();
         self.overlay = Overlay::None;
         if let Some(meta) = list.get(selected) {
             if let Ok(s) = Session::load(&meta.path) {
@@ -270,7 +254,7 @@ impl App {
     }
 
     pub(super) fn delete_selected(&mut self, selected: usize) {
-        let list: Vec<SessionMeta> = self.picker_sessions().into_iter().cloned().collect();
+        let list = self.picker_owned();
         let Some(meta) = list.get(selected).cloned() else {
             return;
         };
@@ -285,19 +269,20 @@ impl App {
             }
             self.toast("session deleted");
         }
-        if let Overlay::Sessions {
-            confirm_delete,
-            searching,
-            ..
-        } = &mut self.overlay
-        {
-            *confirm_delete = false;
-            *searching = false;
+        if let Some(s) = self.overlay.sessions_mut() {
+            s.confirm_delete = false;
+            s.searching = false;
         }
         let n = self.picker_sessions().len();
-        if let Overlay::Sessions { selected: sel, .. } = &mut self.overlay {
-            *sel = selected.min(n.saturating_sub(1));
+        if let Some(s) = self.overlay.sessions_mut() {
+            s.selected = selected.min(n.saturating_sub(1));
         }
+    }
+
+    pub(super) fn apply_model(&mut self, m: String) {
+        self.cfg.set_model(m.clone());
+        self.client.model = m.clone();
+        self.session.model = m;
     }
 
     pub(super) fn open_models(&mut self) {
@@ -309,6 +294,7 @@ impl App {
     }
 
     pub fn on_agent(&mut self, ev: AgentEvent) {
+        self.touch();
         match ev {
             AgentEvent::ThinkingDelta(s) => match self.session.blocks.last_mut() {
                 Some(Block::Thinking { text, .. }) => text.push_str(&s),
@@ -319,12 +305,10 @@ impl App {
                 }),
             },
             AgentEvent::ContentDelta(s) => {
-                if let Some(Block::Thinking { folded, ms, .. }) = self.session.blocks.last_mut() {
-                    *folded = true;
-                    if let Some(t0) = self.thinking_started {
-                        *ms = t0.elapsed().as_millis() as u64;
-                    }
-                }
+                self.fold_thinking(
+                    self.thinking_started
+                        .map(|t0| t0.elapsed().as_millis() as u64),
+                );
                 match self.session.blocks.last_mut() {
                     Some(Block::Assistant { text, .. }) => text.push_str(&s),
                     _ => self.session.blocks.push(Block::Assistant {
@@ -334,9 +318,7 @@ impl App {
                 }
             }
             AgentEvent::ToolStart { id, name, detail } => {
-                if let Some(Block::Thinking { folded, .. }) = self.session.blocks.last_mut() {
-                    *folded = true;
-                }
+                self.fold_thinking(None);
                 self.session.blocks.push(Block::Tool {
                     id,
                     name,
@@ -416,20 +398,27 @@ impl App {
                     }
                 }
                 let _ = self.session.save();
-                if let Some(next) = {
-                    if self.queue.is_empty() {
-                        None
-                    } else {
-                        Some(self.queue.remove(0))
-                    }
-                } {
+                if !self.queue.is_empty() {
+                    let next = self.queue.remove(0);
                     self.send_user(next);
                 }
             }
         }
         if self.follow {
-            self.scroll = 0;
+            self.scroll.set(0);
             self.selected_block = self.session.blocks.len().saturating_sub(1);
+        }
+    }
+
+    fn fold_thinking(&mut self, ms: Option<u64>) {
+        if let Some(Block::Thinking {
+            folded, ms: slot, ..
+        }) = self.session.blocks.last_mut()
+        {
+            *folded = true;
+            if let Some(v) = ms {
+                *slot = v;
+            }
         }
     }
 

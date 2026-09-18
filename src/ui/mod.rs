@@ -2,10 +2,11 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, LayoutCache, Overlay, Screen};
+use crate::app::{App, LayoutCache, Screen};
 use crate::text::wrap_plain;
 
 mod chat;
+pub(crate) use chat::{ChatCache, PlanCache};
 mod chrome;
 mod overlays;
 mod welcome;
@@ -46,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(frame.area());
 
     draw_header(frame, app, chunks[1]);
-    let resume = matches!(app.overlay, Overlay::Sessions { .. });
+    let resume = app.overlay.is_sessions();
     if !resume {
         match app.screen {
             Screen::Welcome => {
@@ -85,17 +86,13 @@ fn composer_height(app: &App, inner_width: u16) -> u16 {
 mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use tokio::sync::mpsc;
 
     use super::*;
-    use crate::config::Config;
-    use crate::session::ToolStatus;
+    use crate::app::{Overlay, SessionsOverlay};
+    use crate::session::{Block, ToolStatus};
 
     fn demo() -> App {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mut cfg = Config::default();
-        cfg.set_model("demo-model".into());
-        App::new(cfg, tx).unwrap()
+        App::demo()
     }
 
     fn shot(app: &App, w: u16, h: u16) -> String {
@@ -127,6 +124,64 @@ mod tests {
         assert!(!s.contains("Enter:send"), "{s}");
         assert!(!s.to_lowercase().contains(concat!("gr", "ok")));
         assert!(!s.to_lowercase().contains(concat!("x", "ai")));
+    }
+
+    fn first_transcript_row(s: &str) -> String {
+        s.lines()
+            .find(|l| l.contains("row-"))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+
+    fn push_rows(app: &mut App, range: impl Iterator<Item = usize>) {
+        for i in range {
+            app.session.blocks.push(Block::User {
+                text: format!("row-{i:02}"),
+                time: String::new(),
+            });
+        }
+    }
+
+    #[test]
+    fn view_stays_anchored_while_rows_stream_in() {
+        let mut app = demo();
+        app.screen = Screen::Chat;
+        push_rows(&mut app, 0..30);
+        let _ = shot(&app, 100, 24);
+        app.follow = false;
+        app.scroll.set(5);
+        let parked = first_transcript_row(&shot(&app, 100, 24));
+        push_rows(&mut app, 30..34);
+        let after = first_transcript_row(&shot(&app, 100, 24));
+        assert_eq!(
+            after, parked,
+            "rows appended below must not slide the view under the reader"
+        );
+    }
+
+    #[test]
+    fn transcript_cache_follows_new_blocks_and_scroll() {
+        let mut app = demo();
+        app.screen = Screen::Chat;
+        push_rows(&mut app, 0..30);
+        let first = shot(&app, 100, 24);
+        assert!(first.contains("row-29"), "{first}");
+        app.session.blocks.push(Block::User {
+            text: "row-30-fresh".into(),
+            time: String::new(),
+        });
+        let second = shot(&app, 100, 24);
+        assert!(
+            second.contains("row-30-fresh"),
+            "new block must invalidate the cache\n{second}"
+        );
+        app.scroll.set(3);
+        let third = shot(&app, 100, 24);
+        assert!(
+            !third.contains("row-30-fresh") && third.contains("row-29"),
+            "scrolling must move the visible window\n{third}"
+        );
     }
 
     #[test]
@@ -175,7 +230,10 @@ mod tests {
     fn footer_hints_follow_composer_state() {
         let mut app = demo();
         let empty = shot(&app, 120, 36);
-        assert!(empty.contains("Shift+Tab:mode | Ctrl+x:shortcuts"), "{empty}");
+        assert!(
+            empty.contains("Shift+Tab:mode | Ctrl+x:shortcuts"),
+            "{empty}"
+        );
         assert!(!empty.contains("Enter:send"), "{empty}");
         app.composer.insert_str("hello");
         let typed = shot(&app, 120, 36);
@@ -224,14 +282,7 @@ mod tests {
                 cwd: PathBuf::from("/Users/a/Develop/tycoon"),
             },
         ];
-        app.overlay = Overlay::Sessions {
-            query: String::new(),
-            selected: 0,
-            confirm_delete: false,
-            expanded: true,
-            filter_cwd: false,
-            searching: false,
-        };
+        app.overlay = Overlay::Sessions(SessionsOverlay::open());
         app
     }
 
@@ -294,8 +345,7 @@ mod tests {
             "{s}"
         );
         assert!(
-            s.lines()
-                .any(|l| l.contains('╭') && l.contains("e expand")),
+            s.lines().any(|l| l.contains('╭') && l.contains("e expand")),
             "footer sits on the composer top border\n{s}"
         );
         assert!(
@@ -318,18 +368,13 @@ mod tests {
             "screenshot terminal is ~272 cols; box stays 120 centered, not full width\n{top}"
         );
         let leading = top.find('┌').unwrap();
+        assert!(leading > 40, "box must be centered, not full-bleed\n{top}");
         assert!(
-            leading > 40,
-            "box must be centered, not full-bleed\n{top}"
-        );
-        assert!(
-            s.lines()
-                .any(|l| l.contains('╭') && l.contains("e expand")),
+            s.lines().any(|l| l.contains('╭') && l.contains("e expand")),
             "at 61 rows the box footer lands on the composer top\n{s}"
         );
         assert!(
-            s.lines()
-                .any(|l| l.contains('└') && l.contains('❯')),
+            s.lines().any(|l| l.contains('└') && l.contains('❯')),
             "at 61 rows the box bottom lands on the prompt row\n{s}"
         );
     }
@@ -338,8 +383,8 @@ mod tests {
     fn resume_filter_chip_toggles_all_local() {
         let mut app = resume_demo();
         assert!(shot(&app, 200, 40).contains("All f"));
-        if let Overlay::Sessions { filter_cwd, .. } = &mut app.overlay {
-            *filter_cwd = true;
+        if let Some(s) = app.overlay.sessions_mut() {
+            s.filter_cwd = true;
         }
         let s = shot(&app, 200, 40);
         assert!(s.contains("Local f"), "{s}");

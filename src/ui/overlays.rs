@@ -5,7 +5,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Overlay};
+use crate::app::{App, Overlay, SessionsOverlay};
 use crate::session::Session;
 use crate::text::{truncate_width, wrap_plain};
 use crate::theme::Theme;
@@ -29,22 +29,7 @@ pub(super) fn draw_overlay(frame: &mut Frame, app: &App) {
             "New session?",
             "press ctrl+n again or enter · discards nothing already saved",
         ),
-        Overlay::Sessions {
-            query,
-            selected,
-            confirm_delete,
-            searching,
-            filter_cwd,
-            ..
-        } => sessions(
-            frame,
-            app,
-            query,
-            *selected,
-            *confirm_delete,
-            *searching,
-            *filter_cwd,
-        ),
+        Overlay::Sessions(s) => sessions(frame, app, s),
         Overlay::Models { items, selected } => models(frame, app, th, items, *selected),
         Overlay::Permission {
             name,
@@ -86,10 +71,7 @@ fn overlay_top(width: usize, title: &str, th: Theme) -> Line<'static> {
 }
 
 fn overlay_bottom(inner_w: usize, border: Style) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("└{}┘", "─".repeat(inner_w)),
-        border,
-    ))
+    Line::from(Span::styled(format!("└{}┘", "─".repeat(inner_w)), border))
 }
 
 fn overlay_keys(
@@ -108,10 +90,7 @@ fn overlay_keys(
         mid.push(Span::styled((*k).to_string(), key));
         mid.push(Span::styled(format!(" {l}"), lab));
     }
-    let w: usize = mid
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
+    let w = crate::text::spans_width(&mid);
     let left = inner_w.saturating_sub(w) / 2;
     let right = inner_w.saturating_sub(left + w);
     let mut spans = vec![
@@ -195,21 +174,16 @@ fn confirm(frame: &mut Frame, app: &App, th: Theme, title: &str, body: &str) {
         56,
         vec![
             (Line::from(""), false),
-            (Line::from(Span::styled(format!("  {body}"), th.dim())), false),
+            (
+                Line::from(Span::styled(format!("  {body}"), th.dim())),
+                false,
+            ),
         ],
         &[("enter", "confirm"), ("esc", "cancel")],
     );
 }
 
-fn sessions(
-    frame: &mut Frame,
-    app: &App,
-    query: &str,
-    selected: usize,
-    confirm_delete: bool,
-    searching: bool,
-    filter_cwd: bool,
-) {
+fn sessions(frame: &mut Frame, app: &App, picker: &SessionsOverlay) {
     let th = app.theme;
     let full = frame.area();
     let border = Style::default().fg(th.fg_mute).bg(th.bg);
@@ -237,10 +211,7 @@ fn sessions(
     let mut body: Vec<(Line, Option<usize>)> = Vec::new();
     let mut last_group: Option<String> = None;
     if list.is_empty() {
-        body.push((
-            Line::from(Span::styled("  no sessions", th.mute())),
-            None,
-        ));
+        body.push((Line::from(Span::styled("  no sessions", th.mute())), None));
     }
     for (i, s) in list.iter().enumerate() {
         let g = Session::group_label(&s.cwd);
@@ -252,7 +223,13 @@ fn sessions(
             last_group = Some(g);
         }
         body.push((
-            session_row(s.title.as_str(), s.updated, i == selected, inner_w, th),
+            session_row(
+                s.title.as_str(),
+                s.updated,
+                i == picker.selected,
+                inner_w,
+                th,
+            ),
             Some(i),
         ));
     }
@@ -261,7 +238,7 @@ fn sessions(
     let list_h = inner_rows.saturating_sub(4).max(1);
     let sel_line = body
         .iter()
-        .position(|(_, idx)| *idx == Some(selected))
+        .position(|(_, idx)| *idx == Some(picker.selected))
         .unwrap_or(0);
     let start = (sel_line + 1).saturating_sub(list_h);
     let end = (start + list_h).min(body.len());
@@ -271,9 +248,9 @@ fn sessions(
         overlay_top(box_w as usize, "Resume session", th),
         sided(Line::from(""), inner_w, th, border, false),
         resume_search(
-            query,
-            searching,
-            if filter_cwd { "Local" } else { "All" },
+            &picker.query,
+            picker.searching,
+            if picker.filter_cwd { "Local" } else { "All" },
             inner_w,
             th,
             border,
@@ -295,7 +272,7 @@ fn sessions(
             inner_w,
             th,
             border,
-            idx.is_some_and(|i| i == selected),
+            idx.is_some_and(|i| i == picker.selected),
         ));
         if let Some(i) = idx {
             hits.push((
@@ -312,7 +289,7 @@ fn sessions(
     while lines.len() + 2 < box_h as usize {
         lines.push(sided(Line::from(""), inner_w, th, border, false));
     }
-    let keys: &[(&str, &str)] = if confirm_delete {
+    let keys: &[(&str, &str)] = if picker.confirm_delete {
         &[("y", "confirm"), ("n", "cancel")]
     } else {
         &[
@@ -381,11 +358,7 @@ fn sided(
     selected: bool,
 ) -> Line<'static> {
     let pad_style = if selected { th.selected() } else { th.base() };
-    let w: usize = content
-        .spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
+    let w = crate::text::spans_width(&content.spans);
     let mut spans = vec![Span::styled("│", border)];
     spans.extend(content.spans);
     if w < inner_w {
@@ -450,7 +423,10 @@ fn models(frame: &mut Frame, app: &App, th: Theme, items: &[String], selected: u
                     true,
                 )
             } else {
-                (Line::from(Span::styled(format!("    {m}"), th.base())), false)
+                (
+                    Line::from(Span::styled(format!("    {m}"), th.base())),
+                    false,
+                )
             }
         })
         .collect();
@@ -477,7 +453,10 @@ fn permission(frame: &mut Frame, app: &App, th: Theme, name: &str, detail: &str,
         th.error()
     };
     let body = vec![
-        (Line::from(Span::styled(format!("  {name}"), th.accent_bold())), false),
+        (
+            Line::from(Span::styled(format!("  {name}"), th.accent_bold())),
+            false,
+        ),
         (
             Line::from(Span::styled(
                 format!("  {}", truncate_width(detail, 60)),

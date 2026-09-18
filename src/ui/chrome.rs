@@ -7,7 +7,10 @@ use unicode_width::UnicodeWidthStr;
 
 use super::inset;
 use crate::app::{App, Focus, Overlay, Screen};
+use crate::composer::DraftKind;
 use crate::text::wrap_plain;
+
+const MATCH_FG: Color = Color::Rgb(110, 163, 254);
 
 pub(super) fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let th = app.theme;
@@ -67,8 +70,8 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     };
     let mode_owned;
     let mode: &str = match app.composer.kind {
-        crate::composer::DraftKind::Shell => "shell",
-        crate::composer::DraftKind::Chat => {
+        DraftKind::Shell => "shell",
+        DraftKind::Chat => {
             mode_owned = app.session.mode.label().to_lowercase();
             &mode_owned
         }
@@ -101,8 +104,8 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let prefix = match app.composer.kind {
-        crate::composer::DraftKind::Shell => "! ",
-        crate::composer::DraftKind::Chat => "❯ ",
+        DraftKind::Shell => "! ",
+        DraftKind::Chat => "❯ ",
     };
     let pad = UnicodeWidthStr::width(prefix) + 1;
     let inner_w = inner.width.saturating_sub(pad as u16).max(1) as usize;
@@ -111,12 +114,10 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         let wrapped = wrap_plain(raw, inner_w);
         for (j, w) in wrapped.iter().enumerate() {
             if i == 0 && j == 0 {
-                let slash_hit = app
-                    .slash_items()
-                    .is_some_and(|c| !c.is_empty())
+                let slash_hit = app.slash_items().is_some_and(|c| !c.is_empty())
                     || app.at_entries().is_some_and(|c| !c.is_empty());
                 let text_st = if slash_hit {
-                    Style::default().fg(Color::Rgb(110, 163, 254)).bg(th.bg)
+                    Style::default().fg(MATCH_FG).bg(th.bg)
                 } else {
                     th.base()
                 };
@@ -278,7 +279,7 @@ fn draw_comp_panel(
             )
         };
         let pad = Style::default().fg(th.fg).bg(row_bg);
-        let hit_st = Style::default().fg(Color::Rgb(110, 163, 254)).bg(row_bg);
+        let hit_st = Style::default().fg(MATCH_FG).bg(row_bg);
         let mut name_spans: Vec<Span> = item
             .name
             .chars()
@@ -300,10 +301,10 @@ fn draw_comp_panel(
         if nw < name_w {
             name_spans.push(Span::styled(" ".repeat(name_w - nw), pad));
         }
-        let about = crate::text::truncate_width(item.about, inner_w.saturating_sub(prefix_w + name_w + 1));
-        let gap = inner_w.saturating_sub(
-            prefix_w + name_w + 1 + UnicodeWidthStr::width(about.as_str()),
-        );
+        let about =
+            crate::text::truncate_width(item.about, inner_w.saturating_sub(prefix_w + name_w + 1));
+        let gap =
+            inner_w.saturating_sub(prefix_w + name_w + 1 + UnicodeWidthStr::width(about.as_str()));
         let mut spans = vec![
             Span::styled("  ", pad),
             Span::styled(if item.selected { "❯" } else { " " }, chev_st),

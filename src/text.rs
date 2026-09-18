@@ -249,6 +249,70 @@ pub fn markdown_lines(md: &str, width: usize, th: &Theme) -> Vec<Line<'static>> 
     lines
 }
 
+/// CSI parameter / intermediate bytes (`ESC [ < 64 ; 149 ; 19 M`).
+pub(crate) fn csi_param(c: char) -> bool {
+    c.is_ascii_digit()
+        || matches!(
+            c,
+            ';' | ':' | '<' | '>' | '?' | '=' | '+' | '-' | '.' | '$' | '"' | '\'' | ' '
+        )
+}
+
+pub(crate) fn csi_final(c: char) -> bool {
+    ('\u{40}'..='\u{7e}').contains(&c)
+}
+
+/// Drop terminal escape sequences and stray control bytes from text that
+/// arrives outside the key path (bracketed paste, mouse residue). `\n` and
+/// `\t` survive.
+pub fn sanitize_input(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\x1b' => match it.next() {
+                Some('[') => {
+                    for c2 in it.by_ref() {
+                        if csi_final(c2) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ends at BEL or ST.
+                Some(']') => {
+                    while let Some(c2) = it.next() {
+                        if c2 == '\x07' {
+                            break;
+                        }
+                        if c2 == '\x1b' {
+                            if it.peek() == Some(&'\\') {
+                                it.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // SS3: one introducer plus one final byte.
+                Some('O') => {
+                    it.next();
+                }
+                _ => {}
+            },
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+pub fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
 pub fn truncate_width(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
@@ -280,6 +344,14 @@ mod tests {
         assert!(rows
             .iter()
             .all(|r| r.width() <= 2 || r.chars().count() == 1));
+    }
+
+    #[test]
+    fn sanitize_drops_escape_residue() {
+        assert_eq!(sanitize_input("\x1b[<64;149;19Mhello"), "hello");
+        assert_eq!(sanitize_input("a\x1b[27ubb"), "abb");
+        assert_eq!(sanitize_input("bell\x07here"), "bellhere");
+        assert_eq!(sanitize_input("keep\nme\ttoo"), "keep\nme\ttoo");
     }
 
     #[test]

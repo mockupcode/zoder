@@ -1,6 +1,6 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text::{byte_at_grapheme, grapheme_at_byte, grapheme_len};
+use crate::text::{byte_at_grapheme, grapheme_at_byte};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind {
@@ -228,7 +228,6 @@ impl Composer {
             }
             col = col.saturating_add(gw);
         }
-        let _ = grapheme_len(&self.text);
         (col, row)
     }
 }

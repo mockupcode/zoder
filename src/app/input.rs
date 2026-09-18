@@ -1,25 +1,68 @@
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Position;
 
-use super::{App, Focus, Overlay};
+use super::{step_index, App, Focus, Overlay, Residue};
 use crate::session::AgentMode;
 use crate::slash;
-use crate::tools;
+use crate::text::{csi_final, csi_param};
+
+/// How long an `ESC` keeps the residue filter armed.
+const RESIDUE_WINDOW: Duration = Duration::from_millis(250);
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return;
         }
+        if key.code == KeyCode::Esc {
+            self.residue = Some(Residue::arm());
+        } else if self.eat_residue(&key) {
+            return;
+        }
+        self.touch();
         if matches!(self.overlay, Overlay::None) {
             self.handle_global_or_main(key);
         } else {
             self.handle_overlay(key);
+        }
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// Swallow `ESC [ … M` tails that leak in as ordinary characters after a
+    /// lone ESC was consumed on its own.
+    fn eat_residue(&mut self, key: &KeyEvent) -> bool {
+        let Some(res) = self.residue.as_mut() else {
+            return false;
+        };
+        if res.started.elapsed() > RESIDUE_WINDOW {
+            self.residue = None;
+            return false;
+        }
+        let KeyCode::Char(c) = key.code else {
+            self.residue = None;
+            return false;
+        };
+        if res.in_seq {
+            if csi_param(c) {
+                return true;
+            }
+            self.residue = None;
+            return csi_final(c);
+        }
+        if matches!(c, '[' | 'O') {
+            res.in_seq = true;
+            true
+        } else {
+            self.residue = None;
+            false
         }
     }
 
@@ -71,7 +114,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char('x') | KeyCode::Char('?') => {
-                    self.overlay = Overlay::Help;
+                    self.open_help();
                     return;
                 }
                 KeyCode::Char('l') => {
@@ -96,7 +139,7 @@ impl App {
         }
 
         if key.code == KeyCode::Char('?') && self.composer.is_empty() {
-            self.overlay = Overlay::Help;
+            self.open_help();
             return;
         }
 
@@ -159,6 +202,10 @@ impl App {
                     self.cycle_mode();
                     return;
                 }
+                if c.is_control() {
+                    // Bytes from a half-parsed escape sequence, never real text.
+                    return;
+                }
                 if self.focus != Focus::Prompt {
                     self.focus = Focus::Prompt;
                 }
@@ -177,12 +224,16 @@ impl App {
             if matches!(key.code, KeyCode::Char('q')) {
                 self.ctrl_q();
             } else {
-                self.overlay = Overlay::None;
+                self.close_overlay();
             }
             return;
         }
+        if self.overlay.is_sessions() {
+            self.handle_sessions_key(key);
+            return;
+        }
         match &mut self.overlay {
-            Overlay::None => {}
+            Overlay::None | Overlay::Sessions(_) => {}
             Overlay::Help => {
                 if matches!(
                     key.code,
@@ -202,15 +253,10 @@ impl App {
                 }
                 _ => self.overlay = Overlay::None,
             },
-            Overlay::Sessions { .. } => self.handle_sessions_key(key),
             Overlay::Models { items, selected } => match key.code {
                 KeyCode::Esc => self.overlay = Overlay::None,
-                KeyCode::Up => *selected = selected.saturating_sub(1),
-                KeyCode::Down => {
-                    if *selected + 1 < items.len() {
-                        *selected += 1;
-                    }
-                }
+                KeyCode::Up => step_index(selected, items.len(), false),
+                KeyCode::Down => step_index(selected, items.len(), true),
                 KeyCode::Enter => {
                     if let Some(m) = items.get(*selected).cloned() {
                         self.cfg.set_model(m.clone());
@@ -247,31 +293,19 @@ impl App {
     }
 
     pub(super) fn ctrl_q(&mut self) {
-        let now = Instant::now();
-        if self
-            .last_ctrl_q
-            .map(|t| now.duration_since(t) < Duration::from_millis(1000))
-            .unwrap_or(false)
-        {
+        if self.chord_q.hit(Duration::from_millis(1000)) {
             self.should_quit = true;
         } else {
-            self.last_ctrl_q = Some(now);
             self.overlay = Overlay::QuitConfirm;
             self.toast("press again to quit");
         }
     }
 
     pub(super) fn ctrl_n(&mut self) {
-        let now = Instant::now();
-        if self
-            .last_ctrl_n
-            .map(|t| now.duration_since(t) < Duration::from_millis(1000))
-            .unwrap_or(false)
-        {
-            self.overlay = Overlay::None;
+        if self.chord_n.hit(Duration::from_millis(1000)) {
+            self.close_overlay();
             self.new_session();
         } else {
-            self.last_ctrl_n = Some(now);
             self.overlay = Overlay::NewConfirm;
             self.toast("press again for a new session");
         }
@@ -295,24 +329,15 @@ impl App {
             self.toast("press ctrl+c to cancel the turn");
             return;
         }
-        let now = Instant::now();
-        if self
-            .last_esc
-            .map(|t| now.duration_since(t) < Duration::from_millis(800))
-            .unwrap_or(false)
-        {
+        if self.chord_esc.hit(Duration::from_millis(800)) {
             if !self.composer.is_empty() {
                 self.composer.stash_or_pop();
                 if !self.composer.is_empty() {
                     self.composer.clear();
                 }
             }
-            self.last_esc = None;
-        } else {
-            self.last_esc = Some(now);
-            if !self.composer.is_empty() {
-                self.toast("press again to clear");
-            }
+        } else if !self.composer.is_empty() {
+            self.toast("press again to clear");
         }
     }
 
@@ -351,90 +376,78 @@ impl App {
             None,
         }
         let n = self.picker_sessions().len();
-        let act = {
-            let Overlay::Sessions {
-                query,
-                selected,
-                confirm_delete,
-                expanded,
-                filter_cwd,
-                searching,
-            } = &mut self.overlay
-            else {
-                return;
-            };
-            if *confirm_delete {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Enter => Act::Delete(*selected),
-                    KeyCode::Char('n') | KeyCode::Esc => {
-                        *confirm_delete = false;
-                        Act::None
-                    }
-                    _ => Act::None,
+        let Some(s) = self.overlay.sessions_mut() else {
+            return;
+        };
+        let act = if s.confirm_delete {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Act::Delete(s.selected),
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    s.confirm_delete = false;
+                    Act::None
                 }
-            } else {
-                match key.code {
-                    KeyCode::Esc => {
-                        if *searching || !query.is_empty() {
-                            query.clear();
-                            *searching = false;
-                            *selected = 0;
-                            Act::None
-                        } else {
-                            Act::Close
-                        }
-                    }
-                    KeyCode::Up => {
-                        *selected = selected.saturating_sub(1);
+                _ => Act::None,
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => {
+                    if s.searching || !s.query.is_empty() {
+                        s.query.clear();
+                        s.searching = false;
+                        s.selected = 0;
                         Act::None
+                    } else {
+                        Act::Close
                     }
-                    KeyCode::Down => {
-                        if n > 0 {
-                            *selected = (*selected + 1).min(n - 1);
-                        }
-                        Act::None
-                    }
-                    KeyCode::Enter => Act::Resume(*selected),
-                    KeyCode::Backspace if *searching || !query.is_empty() => {
-                        query.pop();
-                        *selected = 0;
-                        if query.is_empty() {
-                            *searching = false;
-                        }
-                        Act::None
-                    }
-                    KeyCode::Char('/') if !*searching => {
-                        *searching = true;
-                        Act::None
-                    }
-                    KeyCode::Char('e') if !*searching && query.is_empty() => {
-                        *expanded = !*expanded;
-                        *selected = 0;
-                        Act::None
-                    }
-                    KeyCode::Char('f') if !*searching && query.is_empty() => {
-                        *filter_cwd = !*filter_cwd;
-                        *selected = 0;
-                        Act::None
-                    }
-                    KeyCode::Char('d') if !*searching && query.is_empty() => {
-                        if n > 0 {
-                            *confirm_delete = true;
-                        }
-                        Act::None
-                    }
-                    KeyCode::Char(c) => {
-                        *searching = true;
-                        query.push(c);
-                        *selected = 0;
-                        Act::None
-                    }
-                    _ => Act::None,
                 }
+                KeyCode::Up => {
+                    s.step(n, false);
+                    Act::None
+                }
+                KeyCode::Down => {
+                    s.step(n, true);
+                    Act::None
+                }
+                KeyCode::Enter => Act::Resume(s.selected),
+                KeyCode::Backspace if s.searching || !s.query.is_empty() => {
+                    s.query.pop();
+                    s.selected = 0;
+                    if s.query.is_empty() {
+                        s.searching = false;
+                    }
+                    Act::None
+                }
+                KeyCode::Char('/') if !s.searching => {
+                    s.searching = true;
+                    Act::None
+                }
+                KeyCode::Char('e') if !s.searching && s.query.is_empty() => {
+                    s.expanded = !s.expanded;
+                    s.selected = 0;
+                    Act::None
+                }
+                KeyCode::Char('f') if !s.searching && s.query.is_empty() => {
+                    s.filter_cwd = !s.filter_cwd;
+                    s.selected = 0;
+                    Act::None
+                }
+                KeyCode::Char('d') if !s.searching && s.query.is_empty() => {
+                    if n > 0 {
+                        s.confirm_delete = true;
+                    }
+                    Act::None
+                }
+                KeyCode::Char(c) => {
+                    s.searching = true;
+                    s.query.push(c);
+                    s.selected = 0;
+                    Act::None
+                }
+                _ => Act::None,
             }
         };
         match act {
-            Act::Close => self.overlay = Overlay::None,
+            Act::Close => self.close_overlay(),
             Act::Resume(i) => self.resume_selected(i),
             Act::Delete(i) => self.delete_selected(i),
             Act::None => {}
@@ -442,7 +455,11 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
-        if !matches!(self.overlay, Overlay::None | Overlay::Sessions { .. })
+        if matches!(ev.kind, MouseEventKind::Moved) {
+            return;
+        }
+        self.touch();
+        if !matches!(self.overlay, Overlay::None | Overlay::Sessions(_))
             && matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
         {
             let pos = Position::new(ev.column, ev.row);
@@ -450,79 +467,19 @@ impl App {
                 if matches!(self.overlay, Overlay::Permission { .. }) {
                     self.answer_perm(false);
                 } else {
-                    self.overlay = Overlay::None;
+                    self.close_overlay();
                 }
                 return;
             }
         }
-        if matches!(self.overlay, Overlay::Sessions { .. }) {
-            match ev.kind {
-                MouseEventKind::ScrollUp => {
-                    if let Overlay::Sessions { selected, .. } = &mut self.overlay {
-                        *selected = selected.saturating_sub(1);
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    let n = self.picker_sessions().len();
-                    if let Overlay::Sessions { selected, .. } = &mut self.overlay {
-                        if n > 0 {
-                            *selected = (*selected + 1).min(n - 1);
-                        }
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let pos = Position::new(ev.column, ev.row);
-                    if let Some(r) = self.close_hit.get() {
-                        if r.contains(pos) {
-                            self.overlay = Overlay::None;
-                            return;
-                        }
-                    }
-                    let hits = self.pick_hits.take();
-                    let hit = hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, i)| *i);
-                    self.pick_hits.set(hits);
-                    if let Some(i) = hit {
-                        self.resume_selected(i);
-                    }
-                }
-                _ => {}
-            }
+        if self.overlay.is_sessions() {
+            self.mouse_sessions(ev);
             return;
         }
-        if self.at_entries().is_some_and(|c| !c.is_empty())
-            && !self.slash_items().is_some_and(|c| !c.is_empty())
-        {
-            match ev.kind {
-                MouseEventKind::ScrollUp => self.on_up(),
-                MouseEventKind::ScrollDown => self.on_down(),
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let pos = Position::new(ev.column, ev.row);
-                    let hits = self.pick_hits.take();
-                    let hit = hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, i)| *i);
-                    self.pick_hits.set(hits);
-                    if let Some(i) = hit {
-                        self.file_sel = i;
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.slash_items().is_some_and(|c| !c.is_empty()) {
-            match ev.kind {
-                MouseEventKind::ScrollUp => self.on_up(),
-                MouseEventKind::ScrollDown => self.on_down(),
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let pos = Position::new(ev.column, ev.row);
-                    let hits = self.pick_hits.take();
-                    let hit = hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, i)| *i);
-                    self.pick_hits.set(hits);
-                    if let Some(i) = hit {
-                        self.slash_sel = i;
-                    }
-                }
-                _ => {}
-            }
+        let has_files = self.at_entries().is_some_and(|c| !c.is_empty());
+        let has_slash = self.slash_items().is_some_and(|c| !c.is_empty());
+        if (has_files && !has_slash) || has_slash {
+            self.mouse_dropdown(ev, has_files && !has_slash);
             return;
         }
         match ev.kind {
@@ -530,10 +487,58 @@ impl App {
             MouseEventKind::ScrollDown => self.scroll_transcript(-1),
             MouseEventKind::Down(MouseButton::Left) => {
                 let pos = Position::new(ev.column, ev.row);
-                if let Some(r) = self.layout.get().arrow_down {
-                    if r.contains(pos) {
-                        self.follow = true;
-                        self.scroll = 0;
+                if self
+                    .layout
+                    .get()
+                    .arrow_down
+                    .is_some_and(|r| r.contains(pos))
+                {
+                    self.follow = true;
+                    self.scroll.set(0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_sessions(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::ScrollUp => {
+                let n = self.picker_sessions().len();
+                if let Some(s) = self.overlay.sessions_mut() {
+                    s.step(n, false);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                let n = self.picker_sessions().len();
+                if let Some(s) = self.overlay.sessions_mut() {
+                    s.step(n, true);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let pos = Position::new(ev.column, ev.row);
+                if self.close_hit.get().is_some_and(|r| r.contains(pos)) {
+                    self.close_overlay();
+                    return;
+                }
+                if let Some(i) = self.pick_index(pos) {
+                    self.resume_selected(i);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_dropdown(&mut self, ev: MouseEvent, files: bool) {
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.on_up(),
+            MouseEventKind::ScrollDown => self.on_down(),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(i) = self.pick_index(Position::new(ev.column, ev.row)) {
+                    if files {
+                        self.file_sel = i;
+                    } else {
+                        self.slash_sel = i;
                     }
                 }
             }
@@ -541,15 +546,30 @@ impl App {
         }
     }
 
+    fn pick_index(&self, pos: Position) -> Option<usize> {
+        let hits = self.pick_hits.take();
+        let hit = hits.iter().find(|(r, _)| r.contains(pos)).map(|(_, i)| *i);
+        self.pick_hits.set(hits);
+        hit
+    }
+
     pub(super) fn scroll_transcript(&mut self, delta: i16) {
         let max = self.layout.get().max_scroll;
+        if max == 0 {
+            self.scroll.set(0);
+            if delta < 0 {
+                self.follow = true;
+            }
+            return;
+        }
         if delta > 0 {
             self.follow = false;
-            let next = self.scroll.saturating_add(delta as u16);
-            self.scroll = if max == 0 { next } else { next.min(max) };
+            let next = self.scroll.get().saturating_add(delta as u16);
+            self.scroll.set(next.min(max));
         } else {
-            self.scroll = self.scroll.saturating_sub((-delta) as u16);
-            if self.scroll == 0 {
+            self.scroll
+                .set(self.scroll.get().saturating_sub((-delta) as u16));
+            if self.scroll.get() == 0 {
                 self.follow = true;
             }
         }
@@ -557,18 +577,7 @@ impl App {
 
     pub(super) fn on_up(&mut self) {
         if self.focus == Focus::Prompt {
-            if let Some(cmds) = self.slash_items() {
-                if !cmds.is_empty() {
-                    if self.slash_sel > 0 {
-                        self.slash_sel -= 1;
-                    }
-                    return;
-                }
-            }
-            if self.at_entries().is_some_and(|e| !e.is_empty()) {
-                if self.file_sel > 0 {
-                    self.file_sel -= 1;
-                }
+            if self.nav_dropdown(false) {
                 return;
             }
             if self.composer.is_empty() || self.composer.history_idx.is_some() {
@@ -577,34 +586,35 @@ impl App {
             return;
         }
         self.scroll_transcript(1);
-        if self.selected_block > 0 {
-            self.selected_block -= 1;
-        }
+        step_index(&mut self.selected_block, self.session.blocks.len(), false);
     }
 
     pub(super) fn on_down(&mut self) {
         if self.focus == Focus::Prompt {
-            if let Some(cmds) = self.slash_items() {
-                if !cmds.is_empty() {
-                    if self.slash_sel + 1 < cmds.len() {
-                        self.slash_sel += 1;
-                    }
-                    return;
-                }
-            }
-            if let Some(files) = self.at_entries() {
-                if self.file_sel + 1 < files.len() {
-                    self.file_sel += 1;
-                }
+            if self.nav_dropdown(true) {
                 return;
             }
             self.composer.history_down();
             return;
         }
         self.scroll_transcript(-1);
-        if self.selected_block + 1 < self.session.blocks.len() {
-            self.selected_block += 1;
+        step_index(&mut self.selected_block, self.session.blocks.len(), true);
+    }
+
+    fn nav_dropdown(&mut self, down: bool) -> bool {
+        if let Some(cmds) = self.slash_items() {
+            if !cmds.is_empty() {
+                step_index(&mut self.slash_sel, cmds.len(), down);
+                return true;
+            }
         }
+        if let Some(files) = self.at_entries() {
+            if !files.is_empty() {
+                step_index(&mut self.file_sel, files.len(), down);
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn fold_selected(&mut self, collapse: bool) {
@@ -615,31 +625,39 @@ impl App {
 
     pub(super) fn cycle_mode(&mut self) {
         self.session.mode = self.session.mode.next();
-        let label = self.session.mode.label();
-        self.toast(format!("mode {label}"));
-        let _ = self.session.save();
+        self.note_mode(true);
     }
 
     pub(super) fn cycle_always(&mut self) {
-        if self.session.mode == AgentMode::Always {
-            self.session.mode = AgentMode::Normal;
+        self.session.mode = if self.session.mode == AgentMode::Always {
+            AgentMode::Normal
         } else {
-            self.session.mode = AgentMode::Always;
-        }
+            AgentMode::Always
+        };
+        self.note_mode(false);
+    }
+
+    fn note_mode(&mut self, save: bool) {
         self.toast(format!("mode {}", self.session.mode.label()));
+        if save {
+            let _ = self.session.save();
+        }
     }
 
     pub fn slash_items(&self) -> Option<Vec<&'static slash::Command>> {
         self.composer.slash_query().map(slash::matches)
     }
 
-    pub fn at_entries(&self) -> Option<Vec<tools::FileHit>> {
-        self.composer
-            .at_query()
-            .map(|q| tools::list_at_level(&self.session.cwd, q, 200))
+    pub fn at_entries(&self) -> Option<Vec<crate::tools::FileHit>> {
+        let q = self.composer.at_query()?;
+        Some(self.at_cache.borrow_mut().hits(&self.session.cwd, q))
     }
 
     fn at_enter_level(&mut self) -> bool {
+        self.confirm_at(false)
+    }
+
+    pub(super) fn confirm_at(&mut self, insert_file: bool) -> bool {
         let Some(files) = self.at_entries() else {
             return false;
         };
@@ -650,6 +668,10 @@ impl App {
         if files[i].is_dir {
             self.composer.replace_at_query(&files[i].rel);
             self.file_sel = 0;
+            true
+        } else if insert_file {
+            let pick = files[i].rel.clone();
+            self.composer.replace_at_query(&format!("{pick} "));
             true
         } else {
             false
