@@ -301,16 +301,14 @@ fn write_file(session: &Session, args: &Value) -> (bool, String) {
         Err(e) => return (false, e),
     };
     let contents = arg_str(args, "contents").unwrap_or("");
+    let prev = std::fs::read_to_string(&path).unwrap_or_default();
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return (false, e.to_string());
         }
     }
     match std::fs::write(&path, contents) {
-        Ok(()) => (
-            true,
-            format!("wrote {} bytes to {}", contents.len(), path.display()),
-        ),
+        Ok(()) => (true, edit_diff(&prev, &prev, contents)),
         Err(e) => (false, e.to_string()),
     }
 }
@@ -351,10 +349,154 @@ fn search_replace(session: &Session, args: &Value) -> (bool, String) {
     if let Err(e) = std::fs::write(&path, &next) {
         return (false, e.to_string());
     }
-    (
-        true,
-        format!("updated {} ({count} replacement)", path.display()),
-    )
+    (true, edit_diff(&src, old, new))
+}
+
+/// Marker so the transcript can paint a line-numbered red/green hunk.
+pub const EDIT_DIFF: &str = "DIFF";
+
+fn edit_diff(src: &str, old: &str, new: &str) -> String {
+    let Some(at) = src.find(old) else {
+        return format_hunk(1, &line_diff(&[], &split_lines(new)));
+    };
+    let line_begin = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = at + old.len();
+    let line_end = src[end..].find('\n').map(|i| end + i).unwrap_or(src.len());
+    let start_ln = src[..line_begin].bytes().filter(|&b| b == b'\n').count() + 1;
+    let prefix = &src[line_begin..at];
+    let suffix = &src[end..line_end];
+    let old_region = &src[line_begin..line_end];
+    let new_region = format!("{prefix}{new}{suffix}");
+    let ctx = 3usize;
+    let file: Vec<&str> = src.lines().collect();
+    let before = {
+        let i = start_ln.saturating_sub(1);
+        let from = i.saturating_sub(ctx);
+        &file[from..i]
+    };
+    let old_ln_count = old_region.lines().count().max(1);
+    let after_idx = (start_ln - 1 + old_ln_count).min(file.len());
+    let after = {
+        let to = (after_idx + ctx).min(file.len());
+        &file[after_idx..to]
+    };
+    let mut ops = Vec::new();
+    for line in before {
+        ops.push((b' ', (*line).to_string()));
+    }
+    ops.extend(line_diff(
+        &split_lines(old_region),
+        &split_lines(&new_region),
+    ));
+    for line in after {
+        ops.push((b' ', (*line).to_string()));
+    }
+    let start_display = start_ln.saturating_sub(before.len());
+    format_hunk(start_display, &ops)
+}
+
+fn split_lines(s: &str) -> Vec<&str> {
+    if s.is_empty() {
+        Vec::new()
+    } else {
+        s.lines().collect()
+    }
+}
+
+fn line_diff(a: &[&str], b: &[&str]) -> Vec<(u8, String)> {
+    let (n, m) = (a.len(), b.len());
+    if n == 0 && m == 0 {
+        return Vec::new();
+    }
+    if n.saturating_mul(m) > 80_000 {
+        let mut v: Vec<(u8, String)> = a.iter().map(|s| (b'-', (*s).to_string())).collect();
+        v.extend(b.iter().map(|s| (b'+', (*s).to_string())));
+        return v;
+    }
+    let mut dp = vec![vec![0u16; m + 1]; n + 1];
+    for i in 0..n {
+        for j in 0..m {
+            dp[i + 1][j + 1] = if a[i] == b[j] {
+                dp[i][j] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut out = Vec::new();
+    let (mut i, mut j) = (n, m);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            out.push((b' ', a[i - 1].to_string()));
+            i -= 1;
+            j -= 1;
+        } else if dp[i][j - 1] >= dp[i - 1][j] {
+            out.push((b'+', b[j - 1].to_string()));
+            j -= 1;
+        } else {
+            out.push((b'-', a[i - 1].to_string()));
+            i -= 1;
+        }
+    }
+    while i > 0 {
+        out.push((b'-', a[i - 1].to_string()));
+        i -= 1;
+    }
+    while j > 0 {
+        out.push((b'+', b[j - 1].to_string()));
+        j -= 1;
+    }
+    out.reverse();
+    out
+}
+
+fn format_hunk(start: usize, ops: &[(u8, String)]) -> String {
+    let mut old_ln = start;
+    let mut new_ln = start;
+    let mut out = String::from(EDIT_DIFF);
+    out.push('\n');
+    for (tag, text) in ops {
+        let num = match *tag {
+            b'+' => {
+                let n = new_ln;
+                new_ln += 1;
+                n
+            }
+            b'-' => {
+                let n = old_ln;
+                old_ln += 1;
+                n
+            }
+            _ => {
+                let n = new_ln;
+                old_ln += 1;
+                new_ln += 1;
+                n
+            }
+        };
+        out.push(*tag as char);
+        out.push_str(&format!("{num:>4}|{text}\n"));
+    }
+    out
+}
+
+pub fn parse_edit_diff(s: &str) -> Option<Vec<(char, u32, String)>> {
+    let mut lines = s.lines();
+    if lines.next()? != EDIT_DIFF {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for line in lines {
+        let mut chars = line.chars();
+        let tag = chars.next()?;
+        if !matches!(tag, '+' | '-' | ' ') {
+            return None;
+        }
+        let rest: String = chars.collect();
+        let (num, text) = rest.split_once('|')?;
+        rows.push((tag, num.trim().parse().ok()?, text.to_string()));
+    }
+    Some(rows)
 }
 
 fn grep(session: &Session, args: &Value) -> (bool, String) {
@@ -808,6 +950,16 @@ mod tests {
         );
         assert!(ok, "{msg}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha BETA alpha");
+        assert!(msg.starts_with(EDIT_DIFF), "{msg}");
+        let rows = parse_edit_diff(&msg).unwrap();
+        assert!(
+            rows.iter().any(|(t, _, s)| *t == '-' && s.contains("beta")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|(t, _, s)| *t == '+' && s.contains("BETA")),
+            "{rows:?}"
+        );
         let _ = &mut s;
     }
 

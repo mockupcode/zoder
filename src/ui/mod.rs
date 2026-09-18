@@ -211,6 +211,26 @@ mod tests {
     }
 
     #[test]
+    fn edit_tool_paints_a_numbered_diff() {
+        let mut app = demo();
+        app.screen = Screen::Chat;
+        app.session.blocks.push(Block::Tool {
+            id: "1".into(),
+            name: "search_replace".into(),
+            detail: "src/ui/mod.rs".into(),
+            output: "DIFF\n  140|\n+ 141|fn push_rows() {\n- 145|        for i in 0..30 {\n  160|    let after =\n".into(),
+            status: ToolStatus::Ok,
+            folded: false,
+            elapsed_ms: 1,
+        });
+        let s = shot(&app, 120, 36);
+        assert!(s.contains("Edit src/ui/mod.rs"), "{s}");
+        assert!(s.contains("push_rows"), "{s}");
+        assert!(s.contains("141"), "{s}");
+        assert!(!s.contains("│ fn push_rows"), "{s}");
+    }
+
+    #[test]
     fn overlay_cards_share_resume_chrome() {
         let mut app = demo();
         app.overlay = Overlay::Help;

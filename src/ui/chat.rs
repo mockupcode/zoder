@@ -414,9 +414,13 @@ fn tool_lines(
         ToolStatus::Failed => ("✗".into(), th.error()),
         ToolStatus::Denied => ("⊘".into(), th.mute()),
     };
+    let is_edit = matches!(name, "write" | "search_replace");
     let label = match name {
         "bash" => format!("Run {}", truncate_width(detail, width.saturating_sub(12))),
         "read_file" => format!("Read {}", truncate_width(detail, width.saturating_sub(12))),
+        "write" | "search_replace" => {
+            format!("Edit {}", truncate_width(detail, width.saturating_sub(12)))
+        }
         other => format!(
             "{other} {}",
             truncate_width(detail, width.saturating_sub(other.len() + 8))
@@ -429,12 +433,64 @@ fn tool_lines(
     } else {
         "◆".into()
     };
+    let title_st = if is_edit && status == ToolStatus::Ok {
+        th.success()
+    } else {
+        st
+    };
     rows.push(Line::from(Span::styled(
         format!("    {bullet} {label}"),
-        st,
+        title_st,
     )));
     if !folded && !output.is_empty() {
-        rows.extend(output_box(output, width, th));
+        if is_edit {
+            if let Some(hunk) = crate::tools::parse_edit_diff(output) {
+                rows.extend(diff_rows(&hunk, width, th));
+            } else {
+                rows.extend(output_box(output, width, th));
+            }
+        } else {
+            rows.extend(output_box(output, width, th));
+        }
+    }
+    rows
+}
+
+fn diff_rows(hunk: &[(char, u32, String)], width: usize, th: Theme) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let truncated = hunk.len() > 48;
+    let head = if truncated { 24 } else { hunk.len() };
+    let tail_from = if truncated {
+        hunk.len() - 16
+    } else {
+        hunk.len()
+    };
+    for (i, (tag, num, text)) in hunk.iter().enumerate() {
+        if truncated && i == head {
+            rows.push(Line::from(Span::styled(
+                format!("      … {} more lines", hunk.len() - 40),
+                th.dim(),
+            )));
+        }
+        if truncated && i >= head && i < tail_from {
+            continue;
+        }
+        let (bg, fg) = match tag {
+            '+' => (th.diff_ins_bg, th.fg),
+            '-' => (th.diff_del_bg, th.fg),
+            _ => (th.bg, th.fg),
+        };
+        let num_st = Style::default().fg(th.fg_dim).bg(bg);
+        let body_st = Style::default().fg(fg).bg(bg);
+        let body = truncate_width(text, width.saturating_sub(8));
+        let prefix = format!("  {num:>4} ");
+        let used = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(body.as_str());
+        let fill = width.saturating_sub(used);
+        rows.push(Line::from(vec![
+            Span::styled(prefix, num_st),
+            Span::styled(body, body_st),
+            Span::styled(" ".repeat(fill), Style::default().bg(bg)),
+        ]));
     }
     rows
 }
