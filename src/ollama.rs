@@ -208,11 +208,14 @@ mod tests {
 
     #[test]
     fn parses_thinking_and_tool_call() {
-        let line = r#"{"message":{"role":"assistant","content":"","thinking":"hmm","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"a.rs"}}}]},"done":false}"#;
+        let line = r#"{"message":{"role":"assistant","content":"","thinking":"hmm","tool_calls":[{"function":{"name":"view","arguments":{"file_path":"a.rs"}}}]},"done":false}"#;
         let c = parse_chunk(line).unwrap();
         assert_eq!(c.message.thinking, "hmm");
-        assert_eq!(c.message.tool_calls[0].function.name, "read_file");
-        assert_eq!(c.message.tool_calls[0].function.arguments["path"], "a.rs");
+        assert_eq!(c.message.tool_calls[0].function.name, "view");
+        assert_eq!(
+            c.message.tool_calls[0].function.arguments["file_path"],
+            "a.rs"
+        );
     }
 
     #[test]

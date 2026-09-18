@@ -65,6 +65,12 @@ pub enum AgentEvent {
         detail: String,
         reply: oneshot::Sender<bool>,
     },
+    NeedQuestion {
+        prompt: String,
+        hint: String,
+        options: Vec<String>,
+        reply: oneshot::Sender<String>,
+    },
     Todos(Vec<crate::session::Todo>),
     SyncMessages(Vec<ChatMessage>),
     HostModels(Vec<String>),
@@ -304,16 +310,29 @@ async fn dispatch_call(
         return Some(std::mem::take(&mut input.messages));
     }
 
-    if name == "write" || name == "search_replace" {
-        if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-            if p.ends_with("plan.md") {
-                std::fs::create_dir_all(&input.session_dir).ok();
-            }
+    if tools::canonicalize(&name) == "question" {
+        let (ok, output) = ask_questions(&input.cancel, tx, turn, &args).await;
+        input.messages.push(ChatMessage::tool(&name, &output));
+        emit(tx, turn, AgentEvent::ToolEnd { id, output, ok });
+        return None;
+    }
+
+    if matches!(
+        tools::canonicalize(&name),
+        "write" | "edit" | "multiedit" | "lsp_replace_symbol"
+    ) {
+        let p = args
+            .get("file_path")
+            .or_else(|| args.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if p.ends_with("plan.md") {
+            std::fs::create_dir_all(&input.session_dir).ok();
         }
     }
 
     let (ok, output) = tools::execute(guard, &name, &args, &input.cancel).await;
-    if name == "todo_write" {
+    if tools::canonicalize(&name) == "todos" {
         emit(tx, turn, AgentEvent::Todos(guard.todos.clone()));
     }
     input.messages.push(ChatMessage::tool(&name, &output));
@@ -328,6 +347,87 @@ async fn wait_cancel(flag: &AtomicBool) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
     }
+}
+
+async fn ask_questions(cancel: &AtomicBool, tx: &Bus, turn: u64, args: &Value) -> (bool, String) {
+    let Some(qs) = args.get("questions").and_then(|v| v.as_array()) else {
+        return (false, "at least one question is required".into());
+    };
+    if qs.is_empty() {
+        return (false, "at least one question is required".into());
+    }
+    if qs.len() > 5 {
+        return (false, "exceeds maximum of 5 questions per batch".into());
+    }
+    let mut answers = Vec::new();
+    for (i, q) in qs.iter().enumerate() {
+        let qtype = q
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("free_text");
+        let prompt = q
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let hint = q
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if hint.is_empty() {
+            return (false, format!("question {} is missing description", i + 1));
+        }
+        let mut options = Vec::new();
+        match qtype {
+            "yes_no" => {
+                options = vec!["yes".into(), "no".into()];
+            }
+            "single_choice" | "multi_choice" => {
+                let ch = q
+                    .get("choices")
+                    .or_else(|| q.get("options"))
+                    .and_then(|v| v.as_array());
+                if let Some(ch) = ch {
+                    for c in ch.iter().take(5) {
+                        let label = c
+                            .get("label")
+                            .or_else(|| c.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        options.push(label.to_string());
+                    }
+                }
+                if options.len() < 2 && qtype != "free_text" {
+                    return (
+                        false,
+                        format!("question {} needs at least 2 choices", i + 1),
+                    );
+                }
+            }
+            _ => {}
+        }
+        let (rtx, rrx) = oneshot::channel();
+        emit(
+            tx,
+            turn,
+            AgentEvent::NeedQuestion {
+                prompt: prompt.clone(),
+                hint,
+                options,
+                reply: rtx,
+            },
+        );
+        let ans = tokio::select! {
+            r = rrx => r.unwrap_or_else(|_| "cancelled".into()),
+            _ = wait_cancel(cancel) => "cancelled".into(),
+        };
+        if ans == "cancelled" {
+            return (false, "User cancelled this question".into());
+        }
+        answers.push(format!("Q{}: {prompt}\nUser answered: {ans}", i + 1));
+    }
+    (true, answers.join("\n\n"))
 }
 
 fn normalize_args(v: &Value) -> Value {
@@ -357,7 +457,7 @@ pub fn system_prompt(
     if mode == AgentMode::Plan {
         s.push_str(&format!(
             "\nPLAN MODE is on. Do not modify any file except {}.\n\
-             Explore with read/grep/glob/list_dir, then write a plan to that file with:\n\
+             Explore with view/grep/glob/ls, then write a plan to that file with:\n\
              - Context\n- Approach\n- Files to change\n- Reuse (existing functions)\n- Verification\n\
              Do not implement until the user approves.\n",
             plan_path.display()
@@ -389,11 +489,11 @@ mod tests {
     fn repeat_guard_trips_only_on_an_identical_run() {
         let mut g = RepeatGuard::default();
         for _ in 0..REPEAT_LIMIT - 1 {
-            assert!(!g.tripped("read_file {\"path\":\"src/lib.rs\"}"));
+            assert!(!g.tripped("view {\"file_path\":\"src/lib.rs\"}"));
         }
-        assert!(g.tripped("read_file {\"path\":\"src/lib.rs\"}"));
+        assert!(g.tripped("view {\"file_path\":\"src/lib.rs\"}"));
         assert!(
-            !g.tripped("read_file {\"path\":\"src/main.rs\"}"),
+            !g.tripped("view {\"file_path\":\"src/main.rs\"}"),
             "a different call resets the run"
         );
     }

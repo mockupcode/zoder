@@ -414,11 +414,12 @@ fn tool_lines(
         ToolStatus::Failed => ("✗".into(), th.error()),
         ToolStatus::Denied => ("⊘".into(), th.mute()),
     };
-    let is_edit = matches!(name, "write" | "search_replace");
-    let label = match name {
+    let canon = crate::tools::canonicalize(name);
+    let is_edit = matches!(canon, "write" | "edit" | "multiedit" | "lsp_replace_symbol");
+    let label = match canon {
         "bash" => format!("Run {}", truncate_width(detail, width.saturating_sub(12))),
-        "read_file" => format!("Read {}", truncate_width(detail, width.saturating_sub(12))),
-        "write" | "search_replace" => {
+        "view" => format!("View {}", truncate_width(detail, width.saturating_sub(12))),
+        "write" | "edit" | "multiedit" => {
             format!("Edit {}", truncate_width(detail, width.saturating_sub(12)))
         }
         other => format!(
@@ -428,7 +429,7 @@ fn tool_lines(
     };
     let bullet = if status == ToolStatus::Running {
         glyph
-    } else if name == "read_file" {
+    } else if canon == "view" {
         "◈".into()
     } else {
         "◆".into()

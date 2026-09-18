@@ -289,6 +289,60 @@ impl App {
                 KeyCode::Esc => self.answer_perm(false),
                 _ => {}
             },
+            Overlay::Question {
+                options,
+                selected,
+                draft,
+                ..
+            } => {
+                if options.is_empty() {
+                    match key.code {
+                        KeyCode::Esc => self.answer_question("cancelled"),
+                        KeyCode::Enter => {
+                            let t = draft.clone();
+                            self.answer_question(t);
+                        }
+                        KeyCode::Backspace => {
+                            draft.pop();
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            draft.push(c);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc => self.answer_question("cancelled"),
+                        KeyCode::Up => step_index(selected, options.len(), false),
+                        KeyCode::Down => step_index(selected, options.len(), true),
+                        KeyCode::Enter => {
+                            let ans = options
+                                .get(*selected)
+                                .cloned()
+                                .unwrap_or_else(|| "cancelled".into());
+                            self.answer_question(ans);
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            let n = c.to_digit(10).unwrap_or(0) as usize;
+                            if n >= 1 && n <= options.len() {
+                                let ans = options[n - 1].clone();
+                                self.answer_question(ans);
+                            }
+                        }
+                        _ if matches!(ascii_char(&key), Some('y'))
+                            && options.iter().any(|o| o == "yes") =>
+                        {
+                            self.answer_question("yes");
+                        }
+                        _ if matches!(ascii_char(&key), Some('n'))
+                            && options.iter().any(|o| o == "no") =>
+                        {
+                            self.answer_question("no");
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
@@ -297,6 +351,14 @@ impl App {
             std::mem::replace(&mut self.overlay, Overlay::None)
         {
             let _ = r.send(allow);
+        }
+    }
+
+    pub(crate) fn answer_question(&mut self, ans: impl Into<String>) {
+        if let Overlay::Question { reply: Some(r), .. } =
+            std::mem::replace(&mut self.overlay, Overlay::None)
+        {
+            let _ = r.send(ans.into());
         }
     }
 
@@ -478,6 +540,8 @@ impl App {
             if self.close_hit.get().is_some_and(|r| r.contains(pos)) {
                 if matches!(self.overlay, Overlay::Permission { .. }) {
                     self.answer_perm(false);
+                } else if matches!(self.overlay, Overlay::Question { .. }) {
+                    self.answer_question("cancelled");
                 } else {
                     self.close_overlay();
                 }

@@ -54,6 +54,14 @@ pub enum Overlay {
         selected: usize,
         reply: Option<oneshot::Sender<bool>>,
     },
+    Question {
+        prompt: String,
+        hint: String,
+        options: Vec<String>,
+        selected: usize,
+        draft: String,
+        reply: Option<oneshot::Sender<String>>,
+    },
     QuitConfirm,
     NewConfirm,
 }

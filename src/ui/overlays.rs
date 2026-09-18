@@ -37,6 +37,14 @@ pub(super) fn draw_overlay(frame: &mut Frame, app: &App) {
             selected,
             ..
         } => permission(frame, app, th, name, detail, *selected),
+        Overlay::Question {
+            prompt,
+            hint,
+            options,
+            selected,
+            draft,
+            ..
+        } => question(frame, app, th, prompt, hint, options, *selected, draft),
     }
 }
 
@@ -492,5 +500,68 @@ fn permission(frame: &mut Frame, app: &App, th: Theme, name: &str, detail: &str,
         70,
         body,
         &[("1", "allow"), ("2", "deny"), ("esc", "deny")],
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn question(
+    frame: &mut Frame,
+    app: &App,
+    th: Theme,
+    prompt: &str,
+    hint: &str,
+    options: &[String],
+    selected: usize,
+    draft: &str,
+) {
+    let mut body = vec![
+        (
+            Line::from(Span::styled(format!("  {prompt}"), th.accent_bold())),
+            false,
+        ),
+        (
+            Line::from(Span::styled(
+                format!("  {}", truncate_width(hint, 62)),
+                th.dim(),
+            )),
+            false,
+        ),
+        (Line::from(""), false),
+    ];
+    if options.is_empty() {
+        body.push((
+            Line::from(Span::styled(format!("  ❯ {draft}▏"), th.selected())),
+            true,
+        ));
+        paint_card(
+            frame,
+            app,
+            th,
+            "question",
+            72,
+            body,
+            &[("enter", "submit"), ("esc", "cancel")],
+        );
+        return;
+    }
+    for (i, opt) in options.iter().enumerate() {
+        let st = if i == selected {
+            th.selected()
+        } else {
+            th.base()
+        };
+        body.push((
+            Line::from(Span::styled(format!("  {}. {opt}", i + 1), st)),
+            i == selected,
+        ));
+    }
+    paint_card(
+        frame,
+        app,
+        th,
+        "question",
+        72,
+        body,
+        &[("↑↓", "nav"), ("enter", "ok"), ("esc", "cancel")],
     );
 }

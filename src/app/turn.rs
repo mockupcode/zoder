@@ -154,7 +154,11 @@ impl App {
         self.live_turn = self.live_turn.wrapping_add(1);
         self.running = false;
         self.thinking_started = None;
-        self.answer_perm(false);
+        if matches!(self.overlay, Overlay::Question { .. }) {
+            self.answer_question("cancelled");
+        } else {
+            self.answer_perm(false);
+        }
         for b in &mut self.session.blocks {
             match b {
                 Block::Tool {
@@ -348,8 +352,14 @@ impl App {
 
     pub fn on_agent(&mut self, turn: u64, ev: AgentEvent) {
         if turn != 0 && turn != self.live_turn {
-            if let AgentEvent::NeedPermission { reply, .. } = ev {
-                let _ = reply.send(false);
+            match ev {
+                AgentEvent::NeedPermission { reply, .. } => {
+                    let _ = reply.send(false);
+                }
+                AgentEvent::NeedQuestion { reply, .. } => {
+                    let _ = reply.send("cancelled".into());
+                }
+                _ => {}
             }
             return;
         }
@@ -404,6 +414,21 @@ impl App {
                     };
                     *folded = o.lines().count() > 12;
                 }
+            }
+            AgentEvent::NeedQuestion {
+                prompt,
+                hint,
+                options,
+                reply,
+            } => {
+                self.overlay = Overlay::Question {
+                    prompt,
+                    hint,
+                    options,
+                    selected: 0,
+                    draft: String::new(),
+                    reply: Some(reply),
+                };
             }
             AgentEvent::NeedPermission {
                 name,

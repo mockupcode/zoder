@@ -194,7 +194,7 @@ mod tests {
         });
         app.session.blocks.push(crate::session::Block::Tool {
             id: "1".into(),
-            name: "read_file".into(),
+            name: "view".into(),
             detail: "Cargo.toml".into(),
             output: "[package]\nname = \"zoder\"\n".into(),
             status: ToolStatus::Ok,
@@ -204,7 +204,7 @@ mod tests {
         let s = shot(&app, 120, 36);
         assert!(s.contains("❯"), "{s}");
         assert!(s.contains("inspect the crate"), "{s}");
-        assert!(s.contains("Read"), "{s}");
+        assert!(s.contains("View"), "{s}");
         assert!(s.contains("Cargo.toml"), "{s}");
         assert!(s.contains("Shift+Tab:mode"), "{s}");
         assert!(!s.contains("Enter:send"), "{s}");
@@ -216,7 +216,7 @@ mod tests {
         app.screen = Screen::Chat;
         app.session.blocks.push(Block::Tool {
             id: "1".into(),
-            name: "search_replace".into(),
+            name: "edit".into(),
             detail: "src/ui/mod.rs".into(),
             output: "DIFF\n  140|\n+ 141|fn push_rows() {\n- 145|        for i in 0..30 {\n  160|    let after =\n".into(),
             status: ToolStatus::Ok,
