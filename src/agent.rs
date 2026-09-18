@@ -86,61 +86,77 @@ pub struct TurnInput {
     pub plan_path: std::path::PathBuf,
     pub always: bool,
     pub cancel: Arc<AtomicBool>,
+    pub turn: u64,
 }
 
-pub fn spawn(
-    input: TurnInput,
-    tx: mpsc::UnboundedSender<AgentEvent>,
-) -> tokio::task::JoinHandle<()> {
+pub type Bus = mpsc::UnboundedSender<(u64, AgentEvent)>;
+
+fn emit(tx: &Bus, turn: u64, ev: AgentEvent) {
+    let _ = tx.send((turn, ev));
+}
+
+pub fn spawn(input: TurnInput, tx: Bus) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let turn = input.turn;
         match run_turn(input, tx.clone()).await {
             Ok(messages) => {
-                let _ = tx.send(AgentEvent::SyncMessages(messages));
+                emit(&tx, turn, AgentEvent::SyncMessages(messages));
             }
             Err(e) => {
-                let _ = tx.send(AgentEvent::Error(e.to_string()));
+                emit(&tx, turn, AgentEvent::Error(e.to_string()));
             }
         }
-        let _ = tx.send(AgentEvent::Done);
+        emit(&tx, turn, AgentEvent::Done);
     })
 }
 
-async fn run_turn(
-    mut input: TurnInput,
-    tx: mpsc::UnboundedSender<AgentEvent>,
-) -> anyhow::Result<Vec<ChatMessage>> {
+async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessage>> {
     let tools_spec = tools::definitions();
     let mut guard = Session::new(input.cwd.clone(), input.client.model.clone());
     guard.mode = input.mode;
+    let turn = input.turn;
 
     let rounds = max_rounds();
     let mut repeat = RepeatGuard::default();
     for round in 0..rounds {
         if input.cancel.load(Ordering::Relaxed) {
-            let _ = tx.send(AgentEvent::Status("cancelled".into()));
+            emit(&tx, turn, AgentEvent::Status("cancelled".into()));
             return Ok(input.messages);
         }
         let tx2 = tx.clone();
         let result = input
             .client
-            .stream_chat(&input.messages, &tools_spec, true, |chunk| {
+            .stream_chat(&input.messages, &tools_spec, true, &input.cancel, |chunk| {
                 if !chunk.message.thinking.is_empty() {
-                    let _ = tx2.send(AgentEvent::ThinkingDelta(chunk.message.thinking.clone()));
+                    emit(
+                        &tx2,
+                        turn,
+                        AgentEvent::ThinkingDelta(chunk.message.thinking.clone()),
+                    );
                 }
                 if !chunk.message.content.is_empty() {
-                    let _ = tx2.send(AgentEvent::ContentDelta(chunk.message.content.clone()));
+                    emit(
+                        &tx2,
+                        turn,
+                        AgentEvent::ContentDelta(chunk.message.content.clone()),
+                    );
                 }
             })
             .await;
 
+        if input.cancel.load(Ordering::Relaxed) {
+            emit(&tx, turn, AgentEvent::Status("cancelled".into()));
+            return Ok(input.messages);
+        }
+
         let (content, thinking, calls, prompt, eval) = match result {
             Ok(v) => v,
             Err(e) => {
-                let _ = tx.send(AgentEvent::Error(e.to_string()));
+                emit(&tx, turn, AgentEvent::Error(e.to_string()));
                 return Ok(input.messages);
             }
         };
-        let _ = tx.send(AgentEvent::Usage { prompt, eval });
+        emit(&tx, turn, AgentEvent::Usage { prompt, eval });
 
         let tool_val = if calls.is_empty() {
             None
@@ -163,6 +179,7 @@ async fn run_turn(
 
         for (i, call) in calls.iter().enumerate() {
             if input.cancel.load(Ordering::Relaxed) {
+                emit(&tx, turn, AgentEvent::Status("cancelled".into()));
                 return Ok(input.messages);
             }
             if let Some(stop) =
@@ -171,38 +188,48 @@ async fn run_turn(
                 return Ok(stop);
             }
         }
-        let _ = tx.send(AgentEvent::SyncMessages(input.messages.clone()));
+        emit(&tx, turn, AgentEvent::SyncMessages(input.messages.clone()));
     }
-    let _ = tx.send(AgentEvent::Status(format!(
-        "paused after {rounds} tool rounds — send a message to carry on"
-    )));
+    emit(
+        &tx,
+        turn,
+        AgentEvent::Status(format!(
+            "paused after {rounds} tool rounds — send a message to carry on"
+        )),
+    );
     Ok(input.messages)
 }
 
 fn reject_tool(
     messages: &mut Vec<ChatMessage>,
-    tx: &mpsc::UnboundedSender<AgentEvent>,
+    tx: &Bus,
+    turn: u64,
     name: &str,
     id: String,
     msg: String,
 ) {
     messages.push(ChatMessage::tool(name, &msg));
-    let _ = tx.send(AgentEvent::ToolEnd {
-        id,
-        output: msg,
-        ok: false,
-    });
+    emit(
+        tx,
+        turn,
+        AgentEvent::ToolEnd {
+            id,
+            output: msg,
+            ok: false,
+        },
+    );
 }
 
 async fn dispatch_call(
     input: &mut TurnInput,
     guard: &mut Session,
-    tx: &mpsc::UnboundedSender<AgentEvent>,
+    tx: &Bus,
     call: &crate::ollama::ToolCall,
     round: usize,
     i: usize,
     repeat: &mut RepeatGuard,
 ) -> Option<Vec<ChatMessage>> {
+    let turn = input.turn;
     let name = call.function.name.clone();
     let args = normalize_args(&call.function.arguments);
     if repeat.tripped(&format!("{name} {args}")) {
@@ -210,19 +237,23 @@ async fn dispatch_call(
             "{name} was called {REPEAT_LIMIT} times in a row with the same arguments — pausing instead of spinning"
         );
         input.messages.push(ChatMessage::tool(&name, &msg));
-        let _ = tx.send(AgentEvent::Status(msg));
+        emit(tx, turn, AgentEvent::Status(msg));
         return Some(std::mem::take(&mut input.messages));
     }
     let detail = tools::detail(&name, &args);
     let id = format!("r{round}-{i}-{name}");
-    let _ = tx.send(AgentEvent::ToolStart {
-        id: id.clone(),
-        name: name.clone(),
-        detail: detail.clone(),
-    });
+    emit(
+        tx,
+        turn,
+        AgentEvent::ToolStart {
+            id: id.clone(),
+            name: name.clone(),
+            detail: detail.clone(),
+        },
+    );
 
     if let Some(msg) = tools::plan_forbidden(input.mode, &name, &args, &input.plan_path) {
-        reject_tool(&mut input.messages, tx, &name, id, msg);
+        reject_tool(&mut input.messages, tx, turn, &name, id, msg);
         return None;
     }
 
@@ -230,17 +261,47 @@ async fn dispatch_call(
         input.always || input.mode == AgentMode::Always || !tools::needs_permission(&name);
     if !allow {
         let (rtx, rrx) = oneshot::channel();
-        let _ = tx.send(AgentEvent::NeedPermission {
-            id: id.clone(),
-            name: name.clone(),
-            detail: detail.clone(),
-            reply: rtx,
-        });
-        allow = rrx.await.unwrap_or(false);
+        emit(
+            tx,
+            turn,
+            AgentEvent::NeedPermission {
+                id: id.clone(),
+                name: name.clone(),
+                detail: detail.clone(),
+                reply: rtx,
+            },
+        );
+        tokio::select! {
+            r = rrx => allow = r.unwrap_or(false),
+            _ = wait_cancel(&input.cancel) => {
+                reject_tool(
+                    &mut input.messages,
+                    tx,
+                    turn,
+                    &name,
+                    id,
+                    "cancelled".into(),
+                );
+                emit(tx, turn, AgentEvent::Status("cancelled".into()));
+                return Some(std::mem::take(&mut input.messages));
+            }
+        }
     }
     if !allow {
-        reject_tool(&mut input.messages, tx, &name, id, "denied by user".into());
+        reject_tool(
+            &mut input.messages,
+            tx,
+            turn,
+            &name,
+            id,
+            "denied by user".into(),
+        );
         return None;
+    }
+
+    if input.cancel.load(Ordering::Relaxed) {
+        emit(tx, turn, AgentEvent::Status("cancelled".into()));
+        return Some(std::mem::take(&mut input.messages));
     }
 
     if name == "write" || name == "search_replace" {
@@ -251,13 +312,22 @@ async fn dispatch_call(
         }
     }
 
-    let (ok, output) = tools::execute(guard, &name, &args).await;
+    let (ok, output) = tools::execute(guard, &name, &args, &input.cancel).await;
     if name == "todo_write" {
-        let _ = tx.send(AgentEvent::Todos(guard.todos.clone()));
+        emit(tx, turn, AgentEvent::Todos(guard.todos.clone()));
     }
     input.messages.push(ChatMessage::tool(&name, &output));
-    let _ = tx.send(AgentEvent::ToolEnd { id, output, ok });
+    emit(tx, turn, AgentEvent::ToolEnd { id, output, ok });
     None
+}
+
+async fn wait_cancel(flag: &AtomicBool) {
+    loop {
+        if flag.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
 }
 
 fn normalize_args(v: &Value) -> Value {

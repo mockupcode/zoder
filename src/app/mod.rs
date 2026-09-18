@@ -142,7 +142,10 @@ pub struct App {
     pub file_sel: usize,
     pub running: bool,
     pub cancel: Arc<AtomicBool>,
-    pub tx: mpsc::UnboundedSender<AgentEvent>,
+    /// In-flight turn. Stale bus events from an aborted turn are dropped.
+    pub live_turn: u64,
+    pub turn_task: Option<tokio::task::JoinHandle<()>>,
+    pub tx: mpsc::UnboundedSender<(u64, AgentEvent)>,
     pub should_quit: bool,
     chord_esc: DoublePress,
     chord_q: DoublePress,
@@ -211,7 +214,7 @@ impl AtCache {
 }
 
 impl App {
-    pub fn new(cfg: Config, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<Self> {
+    pub fn new(cfg: Config, tx: mpsc::UnboundedSender<(u64, AgentEvent)>) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir()?;
         let client = Client::from_config(&cfg);
         let mut session = Session::new(cwd.clone(), cfg.model().to_string());
@@ -254,6 +257,8 @@ impl App {
             file_sel: 0,
             running: false,
             cancel: Arc::new(AtomicBool::new(false)),
+            live_turn: 0,
+            turn_task: None,
             tx,
             should_quit: false,
             chord_esc: DoublePress::default(),
@@ -356,14 +361,18 @@ impl App {
         let mut cfg = Config::default();
         cfg.set_host("http://127.0.0.1:9".into());
         cfg.set_model("demo-model".into());
-        Self::new(cfg, tx).unwrap()
+        let mut app = Self::new(cfg, tx).unwrap();
+        let dir = tempfile::tempdir().expect("demo cwd");
+        app.session.cwd = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        app
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Block;
+    use crate::session::{Block, ToolStatus};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -630,5 +639,72 @@ mod tests {
         assert_eq!(app.overlay.sessions().unwrap().selected, 1);
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn esc_cancels_a_running_turn() {
+        let mut app = App::demo();
+        app.running = true;
+        app.live_turn = 3;
+        app.session.blocks.push(Block::Tool {
+            id: "1".into(),
+            name: "bash".into(),
+            detail: "sleep 30".into(),
+            output: String::new(),
+            status: ToolStatus::Running,
+            folded: false,
+            elapsed_ms: 0,
+        });
+        app.composer.insert_str("typed while working");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.running);
+        assert!(app.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(app.composer.text, "typed while working");
+        assert!(
+            matches!(app.session.blocks.last(), Some(Block::Notice { text }) if text == "cancelled")
+        );
+        assert!(matches!(
+            app.session.blocks.iter().find(|b| matches!(b, Block::Tool { .. })),
+            Some(Block::Tool { status: ToolStatus::Failed, output, .. }) if output == "cancelled"
+        ));
+        app.on_agent(3, AgentEvent::ContentDelta("late".into()));
+        assert!(!app
+            .session
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Assistant { text, .. } if text.contains("late"))));
+    }
+
+    #[test]
+    fn ctrl_c_clears_draft_without_stopping_the_turn() {
+        let mut app = App::demo();
+        app.running = true;
+        app.composer.insert_str("keep going");
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.running);
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn ctrl_chords_ignore_input_language() {
+        let mut app = App::demo();
+        app.composer.insert_str("draft");
+        app.handle_key(KeyEvent::new(KeyCode::Char('\u{3}'), KeyModifiers::NONE));
+        assert!(app.composer.is_empty(), "ETX is Ctrl+C");
+        app.composer.insert_str("draft");
+        app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL));
+        assert!(app.composer.is_empty());
+        app.composer.insert_str("draft");
+        app.handle_key(KeyEvent::new(KeyCode::Char('中'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.composer.text, "draft",
+            "Ctrl must not insert IME glyphs"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+        if crate::layout::to_latin('แ') == Some('c') {
+            app.composer.insert_str("draft");
+            app.handle_key(KeyEvent::new(KeyCode::Char('แ'), KeyModifiers::CONTROL));
+            assert!(app.composer.is_empty(), "physical C under the active layout");
+        }
     }
 }

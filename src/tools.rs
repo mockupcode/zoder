@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use tokio::io::AsyncReadExt;
 
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
@@ -235,7 +238,15 @@ fn arg_path(session: &Session, args: &Value) -> Result<PathBuf, String> {
         .ok_or_else(|| "path is required".into())
 }
 
-pub async fn execute(session: &mut Session, name: &str, args: &Value) -> (bool, String) {
+pub async fn execute(
+    session: &mut Session,
+    name: &str,
+    args: &Value,
+    cancel: &AtomicBool,
+) -> (bool, String) {
+    if cancel.load(Ordering::Relaxed) {
+        return (false, "cancelled".into());
+    }
     match name {
         "read_file" => read_file(session, args),
         "write" => write_file(session, args),
@@ -243,7 +254,7 @@ pub async fn execute(session: &mut Session, name: &str, args: &Value) -> (bool, 
         "grep" => grep(session, args),
         "glob" => glob_files(session, args),
         "list_dir" => list_dir(session, args),
-        "bash" => bash(session, args).await,
+        "bash" => bash(session, args, cancel).await,
         "todo_write" => todo_write(session, args),
         other => (false, format!("unknown tool: {other}")),
     }
@@ -466,7 +477,30 @@ fn list_dir(session: &Session, args: &Value) -> (bool, String) {
     )
 }
 
-async fn bash(session: &Session, args: &Value) -> (bool, String) {
+async fn wait_cancel(flag: &AtomicBool) {
+    loop {
+        if flag.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+}
+
+fn kill_child(child: &mut CommandChild) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.start_kill();
+}
+
+type CommandChild = tokio::process::Child;
+
+async fn bash(session: &Session, args: &Value, cancel: &AtomicBool) -> (bool, String) {
     let Some(command) = arg_str(args, "command") else {
         return (false, "command is required".into());
     };
@@ -477,31 +511,70 @@ async fn bash(session: &Session, args: &Value) -> (bool, String) {
             .clamp(1_000, 300_000),
     );
     let start = Instant::now();
-    let fut = Command::new("zsh")
-        .arg("-c")
+    let mut cmd = Command::new("zsh");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(&session.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output();
-    let output = match tokio::time::timeout(timeout, fut).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return (false, e.to_string()),
-        Err(_) => return (false, format!("timed out after {timeout:?}")),
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return (false, e.to_string()),
     };
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.stderr.is_empty() {
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let read_out = async {
+        let mut b = Vec::new();
+        if let Some(ref mut r) = stdout {
+            let _ = r.read_to_end(&mut b).await;
+        }
+        b
+    };
+    let read_err = async {
+        let mut b = Vec::new();
+        if let Some(ref mut r) = stderr {
+            let _ = r.read_to_end(&mut b).await;
+        }
+        b
+    };
+    let (status, out, err) = tokio::select! {
+        status = child.wait() => {
+            let (out, err) = tokio::join!(read_out, read_err);
+            (status, out, err)
+        }
+        _ = wait_cancel(cancel) => {
+            kill_child(&mut child);
+            let _ = child.wait().await;
+            return (false, "cancelled".into());
+        }
+        _ = tokio::time::sleep(timeout) => {
+            kill_child(&mut child);
+            let _ = child.wait().await;
+            return (false, format!("timed out after {timeout:?}"));
+        }
+    };
+    let output = match status {
+        Ok(s) => s,
+        Err(e) => return (false, e.to_string()),
+    };
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    if !err.is_empty() {
         if !text.is_empty() {
             text.push('\n');
         }
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        text.push_str(&String::from_utf8_lossy(&err));
     }
     if text.len() > 80_000 {
         text.truncate(80_000);
         text.push_str("\n… truncated");
     }
-    let code = output.status.code().unwrap_or(-1);
+    let code = output.code().unwrap_or(-1);
     let ms = start.elapsed().as_millis();
     let body = if text.trim().is_empty() {
         format!("exit {code} ({ms}ms)")
@@ -757,5 +830,27 @@ mod tests {
         let filtered = list_at_level(dir.path(), "src/li", 50);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].rel, "src/lib.rs");
+    }
+
+    #[tokio::test]
+    async fn bash_stops_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::new(dir.path().to_path_buf(), "m".into());
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let cwd = dir.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            let mut session = Session::new(cwd, "m".into());
+            execute(&mut session, "bash", &json!({"command": "sleep 30"}), &flag).await
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        cancel.store(true, Ordering::Relaxed);
+        let (ok, out) = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("bash did not stop")
+            .expect("join");
+        assert!(!ok, "{out}");
+        assert!(out.contains("cancelled"), "{out}");
+        let _ = &mut s;
     }
 }

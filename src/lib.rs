@@ -2,6 +2,7 @@ pub mod agent;
 pub mod app;
 pub mod composer;
 pub mod config;
+pub mod layout;
 pub mod ollama;
 pub mod session;
 pub mod slash;
@@ -50,12 +51,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     tokio::spawn(async move {
         match client.probe().await {
             Ok(models) => {
-                let _ = probe_tx.send(crate::agent::AgentEvent::HostModels(models));
+                let _ = probe_tx.send((0, crate::agent::AgentEvent::HostModels(models)));
             }
             Err(e) => {
-                let _ = probe_tx.send(crate::agent::AgentEvent::Error(format!(
-                    "cannot reach host: {e}"
-                )));
+                let _ = probe_tx.send((
+                    0,
+                    crate::agent::AgentEvent::Error(format!("cannot reach host: {e}")),
+                ));
             }
         }
     });
@@ -104,13 +106,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     result
 }
 
-fn handle_bus(app: &mut App, ev: crate::agent::AgentEvent) {
+fn handle_bus(app: &mut App, (turn, ev): (u64, crate::agent::AgentEvent)) {
     if let crate::agent::AgentEvent::Error(e) = &ev {
         if let Some(rest) = e.strip_prefix("cannot reach host: ") {
             app.connected = Some(Err(rest.to_string()));
         }
     }
-    app.on_agent(ev);
+    app.on_agent(turn, ev);
 }
 
 fn install_terminal() -> anyhow::Result<()> {

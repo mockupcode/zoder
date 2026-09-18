@@ -175,7 +175,7 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(":{l}"), lab));
     };
     if app.running {
-        hint("Ctrl+c", "cancel");
+        hint("esc", "cancel");
     }
     if !app.composer.is_empty() {
         if app.composer.multiline {

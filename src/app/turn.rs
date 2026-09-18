@@ -56,21 +56,26 @@ impl App {
     pub(super) fn spawn_shell(&mut self, cmd: String) {
         let cwd = self.session.cwd.clone();
         let tx = self.tx.clone();
-        self.running = true;
+        self.begin_turn();
+        let turn = self.live_turn;
+        let cancel = self.cancel.clone();
         if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move {
+            self.turn_task = Some(tokio::spawn(async move {
                 let mut s = Session::new(cwd, String::new());
                 let id = "shell".to_string();
-                let _ = tx.send(AgentEvent::ToolStart {
-                    id: id.clone(),
-                    name: "bash".into(),
-                    detail: cmd.clone(),
-                });
+                let _ = tx.send((
+                    turn,
+                    AgentEvent::ToolStart {
+                        id: id.clone(),
+                        name: "bash".into(),
+                        detail: cmd.clone(),
+                    },
+                ));
                 let args = serde_json::json!({"command": cmd});
-                let (ok, output) = tools::execute(&mut s, "bash", &args).await;
-                let _ = tx.send(AgentEvent::ToolEnd { id, output, ok });
-                let _ = tx.send(AgentEvent::Done);
-            });
+                let (ok, output) = tools::execute(&mut s, "bash", &args, &cancel).await;
+                let _ = tx.send((turn, AgentEvent::ToolEnd { id, output, ok }));
+                let _ = tx.send((turn, AgentEvent::Done));
+            }));
         }
     }
 
@@ -111,8 +116,7 @@ impl App {
     }
 
     pub(super) fn start_turn(&mut self) {
-        self.running = true;
-        self.cancel.store(false, Ordering::Relaxed);
+        self.begin_turn();
         self.thinking_started = Some(Instant::now());
         let input = TurnInput {
             client: self.client.clone(),
@@ -123,10 +127,55 @@ impl App {
             plan_path: self.session.plan_path(),
             always: self.session.mode == AgentMode::Always,
             cancel: self.cancel.clone(),
+            turn: self.live_turn,
         };
         if tokio::runtime::Handle::try_current().is_ok() {
-            agent::spawn(input, self.tx.clone());
+            self.turn_task = Some(agent::spawn(input, self.tx.clone()));
         }
+    }
+
+    fn begin_turn(&mut self) {
+        if let Some(h) = self.turn_task.take() {
+            h.abort();
+        }
+        self.live_turn = self.live_turn.wrapping_add(1);
+        self.cancel.store(false, Ordering::Relaxed);
+        self.running = true;
+    }
+
+    pub(super) fn cancel_turn(&mut self) {
+        if !self.running {
+            return;
+        }
+        self.cancel.store(true, Ordering::Relaxed);
+        if let Some(h) = self.turn_task.take() {
+            h.abort();
+        }
+        self.live_turn = self.live_turn.wrapping_add(1);
+        self.running = false;
+        self.thinking_started = None;
+        self.answer_perm(false);
+        for b in &mut self.session.blocks {
+            match b {
+                Block::Tool {
+                    status,
+                    output,
+                    folded,
+                    ..
+                } if *status == ToolStatus::Running => {
+                    *status = ToolStatus::Failed;
+                    *output = "cancelled".into();
+                    *folded = true;
+                }
+                Block::Thinking { folded, .. } => *folded = true,
+                _ => {}
+            }
+        }
+        self.session.blocks.push(Block::Notice {
+            text: "cancelled".into(),
+        });
+        let _ = self.session.save();
+        self.toast("cancelled");
     }
 
     pub(super) fn run_slash(&mut self, name: &str, rest: &str) {
@@ -206,6 +255,10 @@ impl App {
     pub(super) fn new_session(&mut self) {
         if self.running {
             self.cancel.store(true, Ordering::Relaxed);
+            if let Some(h) = self.turn_task.take() {
+                h.abort();
+            }
+            self.live_turn = self.live_turn.wrapping_add(1);
         }
         let _ = self.session.save();
         let cwd = self.session.cwd.clone();
@@ -221,7 +274,7 @@ impl App {
     }
 
     pub(super) fn open_sessions(&mut self) {
-        self.sessions = Session::list_all();
+        self.sessions = Session::list(&self.session.cwd);
         self.overlay = Overlay::Sessions(SessionsOverlay::open());
     }
 
@@ -260,7 +313,7 @@ impl App {
         };
         let current = self.session.id == meta.id;
         if Session::delete(&meta.path).is_ok() {
-            self.sessions = Session::list_all();
+            self.sessions = Session::list(&self.session.cwd);
             if current {
                 self.overlay = Overlay::None;
                 self.new_session();
@@ -293,7 +346,13 @@ impl App {
         self.overlay = Overlay::Models { items, selected: 0 };
     }
 
-    pub fn on_agent(&mut self, ev: AgentEvent) {
+    pub fn on_agent(&mut self, turn: u64, ev: AgentEvent) {
+        if turn != 0 && turn != self.live_turn {
+            if let AgentEvent::NeedPermission { reply, .. } = ev {
+                let _ = reply.send(false);
+            }
+            return;
+        }
         self.touch();
         match ev {
             AgentEvent::ThinkingDelta(s) => match self.session.blocks.last_mut() {

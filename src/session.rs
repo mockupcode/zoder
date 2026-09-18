@@ -280,57 +280,35 @@ impl Session {
     }
 
     pub fn list(cwd: &Path) -> Vec<SessionMeta> {
+        Self::gc_blank(cwd);
         Self::metas_in(&config::sessions_root(cwd))
     }
 
-    pub fn gc_blank() {
-        let root = config::home_dir().join("sessions");
-        let Ok(groups) = std::fs::read_dir(&root) else {
+    fn gc_blank(cwd: &Path) {
+        let root = config::sessions_root(cwd);
+        let Ok(rd) = std::fs::read_dir(&root) else {
             return;
         };
-        for group in groups.flatten() {
-            let gp = group.path();
-            if !gp.is_dir() {
+        for ent in rd.flatten() {
+            let dir = ent.path();
+            if !dir.is_dir() {
                 continue;
             }
-            let Ok(rd) = std::fs::read_dir(&gp) else {
-                continue;
+            let p = dir.join("session.json");
+            let blank = match Session::load(&p) {
+                Ok(s) => !s.has_transcript(),
+                Err(_) => p.exists(),
             };
-            for ent in rd.flatten() {
-                let dir = ent.path();
-                let p = dir.join("session.json");
-                let blank = match Session::load(&p) {
-                    Ok(s) => !s.has_transcript(),
-                    Err(_) => p.exists(),
-                };
-                if blank {
-                    let _ = std::fs::remove_dir_all(&dir);
-                }
-            }
-            if std::fs::read_dir(&gp)
-                .ok()
-                .is_some_and(|mut d| d.next().is_none())
-            {
-                let _ = std::fs::remove_dir(&gp);
+            if blank {
+                let _ = std::fs::remove_dir_all(&dir);
             }
         }
-    }
-
-    pub fn list_all() -> Vec<SessionMeta> {
-        Self::gc_blank();
-        let root = config::home_dir().join("sessions");
-        let mut out = Vec::new();
-        let Ok(groups) = std::fs::read_dir(root) else {
-            return out;
-        };
-        for group in groups.flatten() {
-            if !group.path().is_dir() {
-                continue;
-            }
-            out.extend(Self::metas_in(&group.path()));
+        if std::fs::read_dir(&root)
+            .ok()
+            .is_some_and(|mut d| d.next().is_none())
+        {
+            let _ = std::fs::remove_dir(&root);
         }
-        out.sort_by_key(|a| std::cmp::Reverse(a.updated));
-        out
     }
 
     fn metas_in(root: &Path) -> Vec<SessionMeta> {
@@ -431,6 +409,9 @@ mod tests {
             !s.transcript_path().exists(),
             "empty New session must not hit disk"
         );
+        assert!(s
+            .dir()
+            .starts_with(dir.path().join(".zoder").join("sessions")));
     }
 
     #[test]
@@ -441,13 +422,12 @@ mod tests {
             text: "hi".into(),
             time: String::new(),
         });
-        // point home via cwd only; write to temp session dir by overriding save target
-        std::fs::create_dir_all(s.dir()).ok();
-        let _ = s.save();
-        if s.transcript_path().exists() {
-            let loaded = Session::load(&s.transcript_path()).unwrap();
-            assert_eq!(loaded.blocks.len(), 1);
-        }
+        s.save().unwrap();
+        assert!(s
+            .transcript_path()
+            .starts_with(dir.path().join(".zoder").join("sessions")));
+        let loaded = Session::load(&s.transcript_path()).unwrap();
+        assert_eq!(loaded.blocks.len(), 1);
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -97,6 +99,7 @@ impl Client {
         messages: &[ChatMessage],
         tools: &Value,
         think: bool,
+        cancel: &AtomicBool,
         mut on_chunk: impl FnMut(ChatChunk),
     ) -> anyhow::Result<(String, String, Vec<ToolCall>, u32, u32)> {
         let url = format!("{}/api/chat", self.host.trim_end_matches('/'));
@@ -119,7 +122,19 @@ impl Client {
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut prompt_tokens = 0u32;
         let mut eval_tokens = 0u32;
-        while let Some(item) = stream.next().await {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("cancelled");
+            }
+            let item = tokio::select! {
+                item = stream.next() => item,
+                _ = wait_cancel(cancel) => {
+                    anyhow::bail!("cancelled");
+                }
+            };
+            let Some(item) = item else {
+                break;
+            };
             let bytes = item?;
             buf.push_str(&String::from_utf8_lossy(&bytes));
             while let Some(idx) = buf.find('\n') {
@@ -151,6 +166,9 @@ impl Client {
                     eval_tokens = n;
                 }
                 on_chunk(chunk);
+                if cancel.load(Ordering::Relaxed) {
+                    anyhow::bail!("cancelled");
+                }
             }
         }
         if !buf.trim().is_empty() {
@@ -167,6 +185,15 @@ impl Client {
             }
         }
         Ok((content, thinking, calls, prompt_tokens, eval_tokens))
+    }
+}
+
+async fn wait_cancel(flag: &AtomicBool) {
+    loop {
+        if flag.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
     }
 }
 

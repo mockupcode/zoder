@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -25,6 +24,10 @@ impl App {
             return;
         }
         self.touch();
+        if self.running && key.code == KeyCode::Esc {
+            self.cancel_turn();
+            return;
+        }
         if matches!(self.overlay, Overlay::None) {
             self.handle_global_or_main(key);
         } else {
@@ -67,36 +70,35 @@ impl App {
     }
 
     pub(super) fn handle_global_or_main(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-        if ctrl {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Char('d') => {
+        if let Some(l) = ctrl_letter(&key) {
+            match l {
+                'q' | 'd' => {
                     self.ctrl_q();
                     return;
                 }
-                KeyCode::Char('c') => {
+                'c' => {
                     self.ctrl_c();
                     return;
                 }
-                KeyCode::Char('n') => {
+                'n' => {
                     self.ctrl_n();
                     return;
                 }
-                KeyCode::Char('r') => {
+                'r' => {
                     self.open_sessions();
                     return;
                 }
-                KeyCode::Char('t') => {
+                't' => {
                     self.show_todos = !self.show_todos;
                     return;
                 }
-                KeyCode::Char('o') => {
+                'o' => {
                     self.cycle_always();
                     return;
                 }
-                KeyCode::Char('m') => {
+                'm' => {
                     if self.focus == Focus::Prompt {
                         self.composer.multiline = !self.composer.multiline;
                         self.toast(if self.composer.multiline {
@@ -109,27 +111,26 @@ impl App {
                     }
                     return;
                 }
-                KeyCode::Char('s') => {
+                's' => {
                     self.composer.stash_or_pop();
                     return;
                 }
-                KeyCode::Char('x') | KeyCode::Char('?') => {
+                'x' | '?' => {
                     self.open_help();
                     return;
                 }
-                KeyCode::Char('l') => {
-                    /* reserved */
+                'l' => {
                     return;
                 }
-                KeyCode::Char('k') => {
+                'k' => {
                     self.scroll_transcript(1);
                     return;
                 }
-                KeyCode::Char('j') => {
+                'j' => {
                     self.scroll_transcript(-1);
                     return;
                 }
-                KeyCode::Char('u') => {
+                'u' => {
                     let half = (self.layout.get().body.height / 2).max(1);
                     self.scroll_transcript(half as i16);
                     return;
@@ -138,7 +139,7 @@ impl App {
             }
         }
 
-        if key.code == KeyCode::Char('?') && self.composer.is_empty() {
+        if ascii_char(&key) == Some('?') && self.composer.is_empty() {
             self.open_help();
             return;
         }
@@ -202,8 +203,7 @@ impl App {
                     self.cycle_mode();
                     return;
                 }
-                if c.is_control() {
-                    // Bytes from a half-parsed escape sequence, never real text.
+                if c.is_control() || key.modifiers.contains(KeyModifiers::CONTROL) {
                     return;
                 }
                 if self.focus != Focus::Prompt {
@@ -218,15 +218,18 @@ impl App {
     }
 
     pub(super) fn handle_overlay(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('c'))
-        {
-            if matches!(key.code, KeyCode::Char('q')) {
-                self.ctrl_q();
-            } else {
-                self.close_overlay();
+        if let Some(l) = ctrl_letter(&key) {
+            match l {
+                'q' => {
+                    self.ctrl_q();
+                    return;
+                }
+                'c' => {
+                    self.close_overlay();
+                    return;
+                }
+                _ => {}
             }
-            return;
         }
         if self.overlay.is_sessions() {
             self.handle_sessions_key(key);
@@ -235,19 +238,23 @@ impl App {
         match &mut self.overlay {
             Overlay::None | Overlay::Sessions(_) => {}
             Overlay::Help => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
-                ) {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter)
+                    || matches!(ascii_char(&key), Some('q' | '?'))
+                {
                     self.overlay = Overlay::None;
                 }
             }
             Overlay::QuitConfirm => match key.code {
-                KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char('y') => self.should_quit = true,
+                KeyCode::Enter => self.should_quit = true,
+                _ if matches!(ascii_char(&key), Some('q' | 'y')) => self.should_quit = true,
                 _ => self.overlay = Overlay::None,
             },
             Overlay::NewConfirm => match key.code {
-                KeyCode::Char('n') | KeyCode::Enter | KeyCode::Char('y') => {
+                KeyCode::Enter => {
+                    self.overlay = Overlay::None;
+                    self.new_session();
+                }
+                _ if matches!(ascii_char(&key), Some('n' | 'y')) => {
                     self.overlay = Overlay::None;
                     self.new_session();
                 }
@@ -277,8 +284,9 @@ impl App {
                 }
                 KeyCode::Char('1') | KeyCode::Enter if *selected == 0 => self.answer_perm(true),
                 KeyCode::Char('2') | KeyCode::Enter if *selected == 1 => self.answer_perm(false),
-                KeyCode::Char('y') | KeyCode::Char('a') => self.answer_perm(true),
-                KeyCode::Char('n') | KeyCode::Char('d') | KeyCode::Esc => self.answer_perm(false),
+                _ if matches!(ascii_char(&key), Some('y' | 'a')) => self.answer_perm(true),
+                _ if matches!(ascii_char(&key), Some('n' | 'd')) => self.answer_perm(false),
+                KeyCode::Esc => self.answer_perm(false),
                 _ => {}
             },
         }
@@ -317,8 +325,7 @@ impl App {
             return;
         }
         if self.running {
-            self.cancel.store(true, Ordering::Relaxed);
-            self.toast("cancelling turn");
+            self.cancel_turn();
             return;
         }
         self.toast("press ctrl+q twice to quit");
@@ -326,7 +333,7 @@ impl App {
 
     pub(super) fn on_esc(&mut self) {
         if self.running {
-            self.toast("press ctrl+c to cancel the turn");
+            self.cancel_turn();
             return;
         }
         if self.chord_esc.hit(Duration::from_millis(800)) {
@@ -379,10 +386,16 @@ impl App {
         let Some(s) = self.overlay.sessions_mut() else {
             return;
         };
+        let letter = ascii_char(&key);
         let act = if s.confirm_delete {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => Act::Delete(s.selected),
-                KeyCode::Char('n') | KeyCode::Esc => {
+                KeyCode::Enter => Act::Delete(s.selected),
+                KeyCode::Esc => {
+                    s.confirm_delete = false;
+                    Act::None
+                }
+                _ if letter == Some('y') => Act::Delete(s.selected),
+                _ if letter == Some('n') => {
                     s.confirm_delete = false;
                     Act::None
                 }
@@ -417,31 +430,30 @@ impl App {
                     }
                     Act::None
                 }
-                KeyCode::Char('/') if !s.searching => {
-                    s.searching = true;
-                    Act::None
-                }
-                KeyCode::Char('e') if !s.searching && s.query.is_empty() => {
-                    s.expanded = !s.expanded;
-                    s.selected = 0;
-                    Act::None
-                }
-                KeyCode::Char('f') if !s.searching && s.query.is_empty() => {
-                    s.filter_cwd = !s.filter_cwd;
-                    s.selected = 0;
-                    Act::None
-                }
-                KeyCode::Char('d') if !s.searching && s.query.is_empty() => {
-                    if n > 0 {
-                        s.confirm_delete = true;
-                    }
-                    Act::None
-                }
                 KeyCode::Char(c) => {
-                    s.searching = true;
-                    s.query.push(c);
-                    s.selected = 0;
-                    Act::None
+                    let cmd = crate::layout::to_latin(c).unwrap_or_else(|| c.to_ascii_lowercase());
+                    if !s.searching && cmd == '/' {
+                        s.searching = true;
+                        Act::None
+                    } else if !s.searching && s.query.is_empty() && cmd == 'e' {
+                        s.expanded = !s.expanded;
+                        s.selected = 0;
+                        Act::None
+                    } else if !s.searching && s.query.is_empty() && cmd == 'f' {
+                        s.filter_cwd = !s.filter_cwd;
+                        s.selected = 0;
+                        Act::None
+                    } else if !s.searching && s.query.is_empty() && cmd == 'd' {
+                        if n > 0 {
+                            s.confirm_delete = true;
+                        }
+                        Act::None
+                    } else {
+                        s.searching = true;
+                        s.query.push(c);
+                        s.selected = 0;
+                        Act::None
+                    }
                 }
                 _ => Act::None,
             }
@@ -701,5 +713,47 @@ impl App {
         }
         self.file_sel = 0;
         true
+    }
+}
+
+/// Ctrl chord as a Latin letter, independent of input language.
+/// Terminals send either `Ctrl+c` / `Ctrl+C` or the C0 byte (`\x03`).
+fn ctrl_letter(key: &KeyEvent) -> Option<char> {
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    if matches!(c, '\t' | '\n' | '\r') {
+        return None;
+    }
+    let n = c as u32;
+    if (1..27).contains(&n) {
+        return Some((b'a' + n as u8 - 1) as char);
+    }
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    if c.is_ascii_alphabetic() {
+        Some(c.to_ascii_lowercase())
+    } else if c == '?' {
+        Some('?')
+    } else {
+        crate::layout::to_latin(c)
+    }
+}
+
+fn ascii_char(key: &KeyEvent) -> Option<char> {
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    if let Some(l) = crate::layout::to_latin(c) {
+        return Some(l);
+    }
+    if c.is_ascii() {
+        Some(c.to_ascii_lowercase())
+    } else {
+        None
     }
 }
