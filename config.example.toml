@@ -1,0 +1,17 @@
+# Copy to ~/.zoder/config.toml and edit.
+# Multiple providers can be listed; `provider` selects the active one.
+
+provider = "local"
+always_approve = false
+
+[providers.local]
+kind = "ollama"
+host = "http://127.0.0.1:11434"
+model = ""
+models = []
+
+# [providers.home]
+# kind = "ollama"
+# host = "http://127.0.0.1:11434"
+# model = "llama3.2"
+# models = ["llama3.2", "qwen2.5-coder"]
