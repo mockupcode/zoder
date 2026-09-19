@@ -1,6 +1,6 @@
 [package]
 name = "zoder"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Terminal coding assistant"
 license = "Apache-2.0"

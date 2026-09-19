@@ -13,6 +13,7 @@ pub mod text;
 pub mod theme;
 pub mod tools;
 pub mod ui;
+pub mod update;
 
 use std::io::{stdout, Write};
 use std::time::{Duration, Instant};

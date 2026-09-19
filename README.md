@@ -11,7 +11,13 @@ curl -fsSL https://raw.githubusercontent.com/mockupcode/zoder/main/install.sh | 
 Pin a version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mockupcode/zoder/main/install.sh | bash -s 0.1.0
+curl -fsSL https://raw.githubusercontent.com/mockupcode/zoder/main/install.sh | bash -s 0.1.1
+```
+
+Update an existing install:
+
+```bash
+zoder update
 ```
 
 The script downloads the matching binary from GitHub Releases into `~/.zoder/bin` and adds that directory to PATH.
@@ -19,8 +25,8 @@ The script downloads the matching binary from GitHub Releases into `~/.zoder/bin
 A release is created when a version tag is pushed:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 GitHub Actions builds `macos-aarch64`, `macos-x86_64`, `linux-x86_64`, and `linux-aarch64`.

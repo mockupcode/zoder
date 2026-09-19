@@ -2,7 +2,7 @@
 # Install zoder from GitHub Releases.
 #
 #   curl -fsSL https://raw.githubusercontent.com/mockupcode/zoder/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/mockupcode/zoder/main/install.sh | bash -s 0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/mockupcode/zoder/main/install.sh | bash -s 0.1.1
 #
 set -euo pipefail
 
