@@ -142,7 +142,7 @@ pub fn job_kill(args: &Value) -> (bool, String) {
 }
 
 async fn run_shell(cwd: std::path::PathBuf, command: String, job: Arc<Job>, timeout: Duration) {
-    let mut cmd = Command::new("zsh");
+    let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(&command)
         .current_dir(&cwd)
