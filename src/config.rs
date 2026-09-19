@@ -20,7 +20,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
-    /// Backend kind. Today: `ollama`. Reserved for later adapters.
+    /// Backend kind: `ollama` or `openai`.
     #[serde(default = "default_kind")]
     pub kind: String,
     pub host: String,
@@ -28,8 +28,14 @@ pub struct Provider {
     #[serde(default)]
     pub model: String,
     /// Optional catalog shown in the model picker. Empty = probe the host.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// `device` (browser code + API key), `api_key`, or empty (none).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth: String,
+    /// Env var read for a bearer key (e.g. `XAI_API_KEY`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key_env: String,
 }
 
 fn default_provider_id() -> String {
@@ -40,16 +46,22 @@ fn default_kind() -> String {
     FALLBACK_KIND.to_string()
 }
 
+fn provider(kind: &str, host: &str, model: &str, auth: &str, api_key_env: &str) -> Provider {
+    Provider {
+        kind: kind.to_string(),
+        host: host.to_string(),
+        model: model.to_string(),
+        models: Vec::new(),
+        auth: auth.to_string(),
+        api_key_env: api_key_env.to_string(),
+    }
+}
+
 fn fallback_providers() -> BTreeMap<String, Provider> {
     let mut m = BTreeMap::new();
     m.insert(
         FALLBACK_PROVIDER.to_string(),
-        Provider {
-            kind: default_kind(),
-            host: FALLBACK_HOST.to_string(),
-            model: String::new(),
-            models: Vec::new(),
-        },
+        provider(FALLBACK_KIND, FALLBACK_HOST, "", "", ""),
     );
     m
 }
@@ -147,6 +159,48 @@ impl Config {
         } else {
             false
         }
+    }
+
+    pub fn remove_provider(&mut self, id: &str) -> anyhow::Result<()> {
+        if !self.providers.contains_key(id) {
+            anyhow::bail!("unknown provider `{id}`");
+        }
+        if self.providers.len() == 1 {
+            anyhow::bail!("cannot delete the last provider");
+        }
+        self.providers.remove(id);
+        if self.provider == id {
+            self.provider = if self.providers.contains_key(FALLBACK_PROVIDER) {
+                FALLBACK_PROVIDER.to_string()
+            } else {
+                self.providers.keys().next().cloned().unwrap_or_default()
+            };
+        }
+        Ok(())
+    }
+
+    pub fn api_key_env(&self) -> &str {
+        self.active().map(|p| p.api_key_env.as_str()).unwrap_or("")
+    }
+
+    pub fn auth(&self) -> &str {
+        self.active().map(|p| p.auth.as_str()).unwrap_or("")
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        #[cfg(test)]
+        {
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
+        let Some(path) = config_path() else {
+            anyhow::bail!("no config path");
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let raw = toml::to_string_pretty(self).context("serializing config")?;
+        std::fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -252,5 +306,25 @@ model = "other"
         let cfg = Config::default();
         assert_eq!(cfg.host(), FALLBACK_HOST);
         assert!(!cfg.host().contains("192.168."));
+        assert_eq!(cfg.providers.len(), 1);
+    }
+
+    #[test]
+    fn remove_provider_switches_active() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "grok".into(),
+            provider(
+                "openai",
+                "https://api.x.ai/v1",
+                "grok-4.5",
+                "device",
+                "XAI_API_KEY",
+            ),
+        );
+        cfg.provider = "grok".into();
+        cfg.remove_provider("grok").unwrap();
+        assert_eq!(cfg.provider, FALLBACK_PROVIDER);
+        assert!(cfg.remove_provider(FALLBACK_PROVIDER).is_err());
     }
 }

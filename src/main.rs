@@ -29,6 +29,10 @@ async fn main() {
 }
 
 async fn start() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("provider") {
+        return zoder::provider_cli::run(&args[2..]).await;
+    }
     let cli = Cli::parse();
     let mut cfg = Config::load().unwrap_or_default();
     if let Some(id) = cli.provider {

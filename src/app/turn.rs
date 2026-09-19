@@ -189,8 +189,9 @@ impl App {
                     .count();
                 self.session.blocks.push(Block::Notice {
                     text: format!(
-                        "cwd {}\nhost {}\nmodel {}\nturns {n}\ntokens {}/{}",
+                        "cwd {}\nprovider {}\nhost {}\nmodel {}\nturns {n}\ntokens {}/{}",
                         self.session.cwd.display(),
+                        self.cfg.provider,
                         self.cfg.host(),
                         self.session.model,
                         self.session.prompt_tokens,
@@ -311,6 +312,7 @@ impl App {
         self.cfg.set_model(m.clone());
         self.client.model = m.clone();
         self.session.model = m;
+        let _ = self.cfg.save();
     }
 
     pub(super) fn open_models(&mut self) {
@@ -421,6 +423,11 @@ impl App {
                 }
             }
             AgentEvent::HostModels(models) => {
+                if self.cfg.model().is_empty() {
+                    if let Some(m) = models.first().cloned() {
+                        self.apply_model(m);
+                    }
+                }
                 self.connected = Some(Ok(models));
             }
             AgentEvent::Done => {

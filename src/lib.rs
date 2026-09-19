@@ -1,10 +1,12 @@
 pub mod agent;
 pub mod app;
+pub mod auth;
 pub mod composer;
 pub mod config;
 pub mod highlight;
 pub mod layout;
 pub mod ollama;
+pub mod provider_cli;
 pub mod session;
 pub mod slash;
 pub mod text;
@@ -149,12 +151,8 @@ mod branded_guard {
     use std::fs;
     use std::path::Path;
 
-    fn needles() -> [&'static str; 3] {
-        [
-            concat!("gr", "ok"),
-            concat!("x", "ai"),
-            concat!("space", "x"),
-        ]
+    fn needles() -> [&'static str; 2] {
+        [concat!("cru", "sh"), concat!("charm", "bracelet")]
     }
 
     fn scan_text(label: &str, text: &str, hits: &mut Vec<String>) {

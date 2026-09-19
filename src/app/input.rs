@@ -253,9 +253,7 @@ impl App {
                 KeyCode::Down => step_index(selected, items.len(), true),
                 KeyCode::Enter => {
                     if let Some(m) = items.get(*selected).cloned() {
-                        self.cfg.set_model(m.clone());
-                        self.client.model = m.clone();
-                        self.session.model = m;
+                        self.apply_model(m);
                         self.toast("model updated");
                     }
                     self.overlay = Overlay::None;
