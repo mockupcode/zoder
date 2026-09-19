@@ -211,7 +211,7 @@ mod linux {
         };
         let us_c = CString::new("us").expect("us");
         unsafe {
-            let ctx = (xkb.xkb_context_new)(xkbcommon_dl::xkb_context_flags::empty());
+            let ctx = (xkb.xkb_context_new)(xkbcommon_dl::xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
             if ctx.is_null() {
                 return out;
             }
@@ -229,7 +229,7 @@ mod linux {
                 variant: ptr::null(),
                 options: ptr::null(),
             };
-            let flags = xkb_keymap_compile_flags::empty();
+            let flags = xkb_keymap_compile_flags::XKB_KEYMAP_COMPILE_NO_FLAGS;
             let cur_map = (xkb.xkb_keymap_new_from_names)(ctx, &cur_names, flags);
             let us_map = (xkb.xkb_keymap_new_from_names)(ctx, &us_names, flags);
             if cur_map.is_null() || us_map.is_null() {
