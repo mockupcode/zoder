@@ -2,6 +2,7 @@ pub mod agent;
 pub mod app;
 pub mod composer;
 pub mod config;
+pub mod highlight;
 pub mod layout;
 pub mod ollama;
 pub mod session;

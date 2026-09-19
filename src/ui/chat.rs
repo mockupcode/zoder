@@ -416,7 +416,7 @@ fn tool_lines(
     if !folded && !output.is_empty() {
         if is_edit {
             if let Some(hunk) = crate::tools::parse_edit_diff(output) {
-                rows.extend(diff_rows(&hunk, width, th));
+                rows.extend(diff_rows(&hunk, width, th, detail));
             } else {
                 rows.extend(output_box(output, width, th));
             }
@@ -427,7 +427,12 @@ fn tool_lines(
     rows
 }
 
-fn diff_rows(hunk: &[(char, u32, String)], width: usize, th: Theme) -> Vec<Line<'static>> {
+fn diff_rows(
+    hunk: &[(char, u32, String)],
+    width: usize,
+    th: Theme,
+    path: &str,
+) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     let truncated = hunk.len() > 48;
     let head = if truncated { 24 } else { hunk.len() };
@@ -457,16 +462,23 @@ fn diff_rows(hunk: &[(char, u32, String)], width: usize, th: Theme) -> Vec<Line<
             _ => th.fg_dim,
         };
         let num_st = Style::default().fg(num_fg).bg(th.bg);
-        let body_st = Style::default().fg(fg).bg(bg);
-        let body = truncate_width(text, width.saturating_sub(8));
         let prefix = format!("  {num:>4} ");
-        let used = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(body.as_str());
-        let fill = width.saturating_sub(used);
-        rows.push(Line::from(vec![
+        let indent = "    ";
+        let prefix_w = UnicodeWidthStr::width(prefix.as_str());
+        let budget = width.saturating_sub(prefix_w + 4);
+        let body = truncate_width(text, budget);
+        let mut spans = vec![
             Span::styled(prefix, num_st),
-            Span::styled(body, body_st),
-            Span::styled(" ".repeat(fill), Style::default().bg(bg)),
-        ]));
+            Span::styled(indent, Style::default().fg(fg).bg(bg)),
+        ];
+        let mut used = prefix_w + 4;
+        for (tok_fg, tok) in crate::highlight::line_spans(path, &body, &th) {
+            used += UnicodeWidthStr::width(tok.as_str());
+            spans.push(Span::styled(tok, Style::default().fg(tok_fg).bg(bg)));
+        }
+        let fill = width.saturating_sub(used);
+        spans.push(Span::styled(" ".repeat(fill), Style::default().bg(bg)));
+        rows.push(Line::from(spans));
     }
     rows
 }
