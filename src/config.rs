@@ -36,6 +36,13 @@ pub struct Provider {
     /// Env var read for a bearer key (e.g. `XAI_API_KEY`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key_env: String,
+    /// Token window for auto-compact. 0 = unknown, auto-compact stays off.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub context_window: u32,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn default_provider_id() -> String {
@@ -54,6 +61,7 @@ fn provider(kind: &str, host: &str, model: &str, auth: &str, api_key_env: &str) 
         models: Vec::new(),
         auth: auth.to_string(),
         api_key_env: api_key_env.to_string(),
+        context_window: 0,
     }
 }
 
@@ -185,6 +193,10 @@ impl Config {
 
     pub fn auth(&self) -> &str {
         self.active().map(|p| p.auth.as_str()).unwrap_or("")
+    }
+
+    pub fn context_window(&self) -> u32 {
+        self.active().map(|p| p.context_window).unwrap_or(0)
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

@@ -158,6 +158,7 @@ fn help(frame: &mut Frame, app: &App, th: Theme) {
         Line::from("  ctrl+m           models (or multiline in the prompt)"),
         Line::from("  !                shell on an empty prompt"),
         Line::from("  /                commands"),
+        Line::from("  /compact         summarize history"),
         Line::from("  @                attach a file path"),
         Line::from("  esc esc          clear draft"),
         Line::from("  ctrl+q q         quit"),

@@ -76,6 +76,9 @@ pub struct ChatMessage {
     pub tool_calls: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Marks a compact summary. Later turns send this plus messages after it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_summary: bool,
 }
 
 impl ChatMessage {
@@ -86,6 +89,7 @@ impl ChatMessage {
             thinking: None,
             tool_calls: None,
             tool_name: None,
+            is_summary: false,
         }
     }
 
@@ -96,6 +100,7 @@ impl ChatMessage {
             thinking: None,
             tool_calls: None,
             tool_name: None,
+            is_summary: false,
         }
     }
 
@@ -110,6 +115,7 @@ impl ChatMessage {
             thinking,
             tool_calls,
             tool_name: None,
+            is_summary: false,
         }
     }
 
@@ -120,6 +126,18 @@ impl ChatMessage {
             thinking: None,
             tool_calls: None,
             tool_name: Some(name.into()),
+            is_summary: false,
+        }
+    }
+
+    pub fn summary(text: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: Some(text.into()),
+            thinking: None,
+            tool_calls: None,
+            tool_name: None,
+            is_summary: true,
         }
     }
 }

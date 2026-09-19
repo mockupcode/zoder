@@ -30,6 +30,10 @@ pub const COMMANDS: &[Command] = &[
         about: "List or set the model",
     },
     Command {
+        name: "compact",
+        about: "Summarize history to free context",
+    },
+    Command {
         name: "copy",
         about: "Copy the last assistant reply",
     },

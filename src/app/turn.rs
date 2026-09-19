@@ -120,6 +120,8 @@ impl App {
             cwd: self.session.cwd.clone(),
             cancel: self.cancel.clone(),
             turn: self.live_turn,
+            context_window: self.cfg.context_window(),
+            todos: self.session.todos.clone(),
         };
         if tokio::runtime::Handle::try_current().is_ok() {
             self.turn_task = Some(agent::spawn(input, self.tx.clone()));
@@ -208,6 +210,7 @@ impl App {
                     self.toast(format!("model {rest}"));
                 }
             }
+            "compact" => self.compact_now(),
             "copy" => {
                 if let Some(Block::Assistant { text, .. }) = self
                     .session
@@ -325,6 +328,45 @@ impl App {
         self.session.model = model.clone();
         let _ = self.cfg.save();
         self.toast(format!("{provider} {model}"));
+    }
+
+    pub(super) fn compact_now(&mut self) {
+        if self.running {
+            self.toast("wait until this turn finishes");
+            return;
+        }
+        let n = self
+            .session
+            .messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .count();
+        if n < 2 {
+            self.toast("nothing to compact");
+            return;
+        }
+        self.toast("compacting context");
+        self.begin_turn();
+        let client = self.client.clone();
+        let messages = self.session.messages.clone();
+        let todos = self.session.todos.clone();
+        let cancel = self.cancel.clone();
+        let tx = self.tx.clone();
+        let turn = self.live_turn;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.turn_task = Some(tokio::spawn(async move {
+                match agent::compact_messages(&client, messages, &todos, &cancel).await {
+                    Ok(msgs) => {
+                        let _ = tx.send((turn, AgentEvent::SyncMessages(msgs)));
+                        let _ = tx.send((turn, AgentEvent::Status("context compacted".into())));
+                    }
+                    Err(e) => {
+                        let _ = tx.send((turn, AgentEvent::Error(e.to_string())));
+                    }
+                }
+                let _ = tx.send((turn, AgentEvent::Done));
+            }));
+        }
     }
 
     pub(super) fn open_models(&mut self) {

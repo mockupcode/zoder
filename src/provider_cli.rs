@@ -79,6 +79,7 @@ async fn add() -> anyhow::Result<()> {
                     models: Vec::new(),
                     auth: String::new(),
                     api_key_env: String::new(),
+                    context_window: 0,
                 },
             )
         }
@@ -160,6 +161,7 @@ fn preset_grok() -> (String, Provider) {
             models: Vec::new(),
             auth: "device".into(),
             api_key_env: "XAI_API_KEY".into(),
+            context_window: 256_000,
         },
     )
 }
@@ -174,6 +176,7 @@ fn preset_codex() -> (String, Provider) {
             models: Vec::new(),
             auth: "device".into(),
             api_key_env: "OPENAI_API_KEY".into(),
+            context_window: 256_000,
         },
     )
 }
@@ -188,6 +191,7 @@ fn preset_openrouter() -> (String, Provider) {
             models: Vec::new(),
             auth: "api_key".into(),
             api_key_env: "OPENROUTER_API_KEY".into(),
+            context_window: 0,
         },
     )
 }

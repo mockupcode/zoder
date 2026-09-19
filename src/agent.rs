@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ollama::Client;
-use crate::session::{ChatMessage, Session};
+use crate::session::{ChatMessage, Session, Todo};
 use crate::tools;
 
 /// How many model/tool rounds one turn may spend before it pauses. Agentic work
@@ -15,6 +15,40 @@ use crate::tools;
 const DEFAULT_MAX_ROUNDS: usize = 200;
 /// Identical tool calls in a row before the turn is called stuck.
 const REPEAT_LIMIT: usize = 6;
+const LARGE_WINDOW: u32 = 200_000;
+const LARGE_REMAINING: u32 = 20_000;
+
+const SUMMARY_SYSTEM: &str = "\
+You are summarizing a conversation so work can continue later.
+
+This summary will be the ONLY prior context when the conversation resumes. \
+Assume all previous messages will be lost. Be thorough.
+
+Required sections:
+
+## Current State
+- Exact user request
+- What is done, what is in progress, what is left (specific next steps)
+
+## Files & Changes
+- Files modified, with a brief description
+- Files read and why they matter
+- Paths and line numbers for important locations
+
+## Technical Context
+- Decisions and why
+- Patterns, libraries, commands that worked or failed
+- Environment details
+
+## Strategy
+- Approach, alternatives rejected, gotchas, blockers
+
+## Exact Next Steps
+Numbered, specific (file + location + command), not vague.
+
+Write as a briefing for a teammate taking over mid-task. No emojis. \
+Err on too much detail.
+";
 
 fn max_rounds() -> usize {
     std::env::var("ZODER_MAX_ROUNDS")
@@ -90,6 +124,8 @@ pub struct TurnInput {
     pub cwd: std::path::PathBuf,
     pub cancel: Arc<AtomicBool>,
     pub turn: u64,
+    pub context_window: u32,
+    pub todos: Vec<Todo>,
 }
 
 pub type Bus = mpsc::UnboundedSender<(u64, AgentEvent)>;
@@ -114,6 +150,10 @@ pub fn spawn(input: TurnInput, tx: Bus) -> tokio::task::JoinHandle<()> {
 }
 
 async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessage>> {
+    let live = input.client.live_context_window().await;
+    if live > 0 {
+        input.context_window = live;
+    }
     let tools_spec = tools::definitions();
     let mut guard = Session::new(input.cwd.clone(), input.client.model.clone());
     let turn = input.turn;
@@ -126,9 +166,10 @@ async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessa
             return Ok(input.messages);
         }
         let tx2 = tx.clone();
+        let wired = wire_messages(&input.messages);
         let result = input
             .client
-            .stream_chat(&input.messages, &tools_spec, true, &input.cancel, |chunk| {
+            .stream_chat(&wired, &tools_spec, true, &input.cancel, |chunk| {
                 if !chunk.message.thinking.is_empty() {
                     emit(
                         &tx2,
@@ -176,6 +217,7 @@ async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessa
         ));
 
         if calls.is_empty() {
+            maybe_compact(&mut input, &tx, prompt.saturating_add(eval)).await;
             return Ok(input.messages);
         }
 
@@ -191,6 +233,7 @@ async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessa
             }
         }
         emit(&tx, turn, AgentEvent::SyncMessages(input.messages.clone()));
+        maybe_compact(&mut input, &tx, prompt.saturating_add(eval)).await;
     }
     emit(
         &tx,
@@ -355,6 +398,122 @@ fn normalize_args(v: &Value) -> Value {
     }
 }
 
+pub fn should_compact(used: u32, window: u32) -> bool {
+    if window == 0 || used == 0 {
+        return false;
+    }
+    let remaining = window.saturating_sub(used);
+    let threshold = if window > LARGE_WINDOW {
+        LARGE_REMAINING
+    } else {
+        ((window as f64) * 0.2).round() as u32
+    };
+    remaining <= threshold
+}
+
+/// History actually sent to the model: last compact summary plus later turns.
+pub fn wire_messages(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
+    let sys = msgs.iter().find(|m| m.role == "system").cloned();
+    let Some(i) = msgs.iter().rposition(|m| m.is_summary) else {
+        return msgs.to_vec();
+    };
+    let mut out = Vec::new();
+    if let Some(s) = sys {
+        out.push(s);
+    }
+    let mut sum = msgs[i].clone();
+    sum.role = "user".into();
+    sum.is_summary = false;
+    sum.thinking = None;
+    sum.tool_calls = None;
+    if let Some(body) = sum.content.take() {
+        sum.content = Some(format!("Conversation summary (prior context):\n{body}"));
+    }
+    out.push(sum);
+    out.extend(msgs[i + 1..].iter().filter(|m| m.role != "system").cloned());
+    out
+}
+
+fn summary_user_prompt(todos: &[Todo]) -> String {
+    let mut s = String::from("Provide a detailed summary of our conversation above.");
+    if todos.is_empty() {
+        return s;
+    }
+    s.push_str("\n\n## Current Todo List\n\n");
+    for t in todos {
+        s.push_str(&format!("- [{}] {}\n", t.status, t.content));
+    }
+    s.push_str(
+        "\nInclude these tasks and their statuses. The resuming assistant should keep using the todos tool.",
+    );
+    s
+}
+
+pub async fn compact_messages(
+    client: &Client,
+    mut messages: Vec<ChatMessage>,
+    todos: &[Todo],
+    cancel: &AtomicBool,
+) -> anyhow::Result<Vec<ChatMessage>> {
+    let mut hist: Vec<ChatMessage> = wire_messages(&messages)
+        .into_iter()
+        .filter(|m| m.role != "system")
+        .collect();
+    hist.insert(0, ChatMessage::system(SUMMARY_SYSTEM));
+    hist.push(ChatMessage::user(summary_user_prompt(todos)));
+    let (content, _, _, _, _) = client
+        .stream_chat(&hist, &Value::Array(Vec::new()), false, cancel, |_| {})
+        .await?;
+    if content.trim().is_empty() {
+        anyhow::bail!("compact produced no summary");
+    }
+    messages.push(ChatMessage::summary(content));
+    Ok(messages)
+}
+
+async fn maybe_compact(input: &mut TurnInput, tx: &Bus, used: u32) {
+    if !should_compact(used, input.context_window) {
+        return;
+    }
+    if input.cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    emit(
+        tx,
+        input.turn,
+        AgentEvent::Status("compacting context".into()),
+    );
+    match compact_messages(
+        &input.client,
+        input.messages.clone(),
+        &input.todos,
+        &input.cancel,
+    )
+    .await
+    {
+        Ok(msgs) => {
+            input.messages = msgs;
+            emit(
+                tx,
+                input.turn,
+                AgentEvent::Status("context compacted".into()),
+            );
+            emit(
+                tx,
+                input.turn,
+                AgentEvent::SyncMessages(input.messages.clone()),
+            );
+        }
+        Err(e) => {
+            emit(
+                tx,
+                input.turn,
+                AgentEvent::Status(format!("compact failed: {e}")),
+            );
+        }
+    }
+}
+
 pub fn system_prompt(cwd: &std::path::Path) -> String {
     format!(
         "You are Zoder, a terminal coding assistant. You work inside a full-screen TUI.\n\
@@ -397,5 +556,30 @@ mod tests {
             !g.tripped("view {\"file_path\":\"src/main.rs\"}"),
             "a different call resets the run"
         );
+    }
+
+    #[test]
+    fn compact_skips_unknown_window() {
+        assert!(!should_compact(50_000, 0));
+        assert!(should_compact(110_000, 128_000));
+        assert!(!should_compact(10_000, 128_000));
+        assert!(should_compact(240_000, 256_000));
+    }
+
+    #[test]
+    fn wire_messages_starts_at_last_summary() {
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("old"),
+            ChatMessage::assistant("a".into(), None, None),
+            ChatMessage::summary("keep this"),
+            ChatMessage::user("new"),
+        ];
+        let w = wire_messages(&msgs);
+        assert_eq!(w[0].role, "system");
+        assert_eq!(w[1].role, "user");
+        assert!(w[1].content.as_deref().unwrap_or("").contains("keep this"));
+        assert_eq!(w[2].content.as_deref(), Some("new"));
+        assert_eq!(w.len(), 3);
     }
 }

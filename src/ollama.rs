@@ -149,7 +149,41 @@ impl Client {
         Ok(tags.models.into_iter().map(|m| m.name).collect())
     }
 
-    async fn probe_openai(&self) -> Result<Vec<String>, String> {
+    /// Context window for the current model: Ollama `/api/show`, else the host catalog.
+    pub async fn live_context_window(&self) -> u32 {
+        if self.model.is_empty() {
+            return 0;
+        }
+        if !self.openai() {
+            return self.ollama_context_window().await;
+        }
+        match self.fetch_models_json().await {
+            Ok(body) => parse_model_context(&body, &self.model),
+            Err(_) => 0,
+        }
+    }
+
+    async fn ollama_context_window(&self) -> u32 {
+        let url = format!("{}/api/show", self.host.trim_end_matches('/'));
+        let Ok(res) = self
+            .http
+            .post(&url)
+            .json(&json!({ "model": self.model }))
+            .send()
+            .await
+        else {
+            return 0;
+        };
+        if !res.status().is_success() {
+            return 0;
+        }
+        let Ok(body) = res.json::<Value>().await else {
+            return 0;
+        };
+        parse_ollama_context(&body)
+    }
+
+    async fn fetch_models_json(&self) -> Result<Value, String> {
         let token = self
             .auth_header()
             .await?
@@ -166,7 +200,11 @@ impl Client {
         if !res.status().is_success() {
             return Err(format!("status {}", res.status()));
         }
-        let body: Value = res.json().await.map_err(|e| e.to_string())?;
+        res.json().await.map_err(|e| e.to_string())
+    }
+
+    async fn probe_openai(&self) -> Result<Vec<String>, String> {
+        let body = self.fetch_models_json().await?;
         Ok(parse_model_ids(&body))
     }
 
@@ -835,6 +873,103 @@ fn apply_response_item(acc: &mut Vec<OaiCall>, item: Option<&Value>) {
     });
 }
 
+pub(crate) fn parse_ollama_context(body: &Value) -> u32 {
+    if let Some(p) = body.get("parameters").and_then(|s| s.as_str()) {
+        for line in p.lines() {
+            let mut parts = line.split_whitespace();
+            if parts.next() == Some("num_ctx") {
+                if let Some(n) = parts.next().and_then(|s| s.parse().ok()) {
+                    if n > 0 {
+                        return n;
+                    }
+                }
+            }
+        }
+    }
+    let mut best = 0u32;
+    if let Some(info) = body.get("model_info").and_then(|o| o.as_object()) {
+        for (k, val) in info {
+            if !k.ends_with("context_length") {
+                continue;
+            }
+            let n = val
+                .as_u64()
+                .or_else(|| val.as_i64().map(|i| i as u64))
+                .unwrap_or(0);
+            if n > 0 && n <= u32::MAX as u64 {
+                best = best.max(n as u32);
+            }
+        }
+    }
+    best
+}
+
+fn json_u32(v: Option<&Value>) -> u32 {
+    let Some(v) = v else {
+        return 0;
+    };
+    let n = v
+        .as_u64()
+        .or_else(|| v.as_i64().map(|i| i.max(0) as u64))
+        .or_else(|| v.as_f64().map(|f| f.max(0.0) as u64))
+        .unwrap_or(0);
+    if n == 0 || n > u32::MAX as u64 {
+        0
+    } else {
+        n as u32
+    }
+}
+
+fn context_of_entry(m: &Value) -> u32 {
+    let budget = json_u32(m.get("context_window"));
+    if budget > 0 {
+        return budget;
+    }
+    let advertised = json_u32(m.get("context_length"));
+    let provider = json_u32(m.get("top_provider").and_then(|p| p.get("context_length")));
+    match (advertised, provider) {
+        (a, p) if a > 0 && p > 0 => a.min(p),
+        (a, _) if a > 0 => a,
+        (_, p) if p > 0 => p,
+        _ => json_u32(m.get("max_context_window")),
+    }
+}
+
+fn model_entry_id(m: &Value) -> Option<&str> {
+    m.get("id")
+        .or_else(|| m.get("slug"))
+        .or_else(|| m.get("name"))
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn parse_model_context(body: &Value, model: &str) -> u32 {
+    let mut fallback = 0;
+    for arr_key in ["data", "models"] {
+        let Some(arr) = body.get(arr_key).and_then(|d| d.as_array()) else {
+            continue;
+        };
+        for m in arr {
+            let Some(id) = model_entry_id(m) else {
+                continue;
+            };
+            let n = context_of_entry(m);
+            if n == 0 {
+                continue;
+            }
+            if id == model {
+                return n;
+            }
+            let id_tail = id.rsplit('/').next().unwrap_or(id);
+            let model_tail = model.rsplit('/').next().unwrap_or(model);
+            if fallback == 0 && (id_tail == model || model_tail == id) {
+                fallback = n;
+            }
+        }
+    }
+    fallback
+}
+
 pub(crate) fn parse_model_ids(body: &Value) -> Vec<String> {
     let mut ids = Vec::new();
     if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
@@ -967,6 +1102,48 @@ mod tests {
         assert_eq!(input[1]["name"], "view");
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[2]["call_id"], input[1]["call_id"]);
+    }
+
+    #[test]
+    fn parse_ollama_context_prefers_num_ctx() {
+        let body = json!({
+            "parameters": "num_keep 24\nnum_ctx 4096\nstop <|eot_id|>",
+            "model_info": { "llama.context_length": 131072 }
+        });
+        assert_eq!(parse_ollama_context(&body), 4096);
+        let arch = json!({ "model_info": { "qwen2.context_length": 32768 } });
+        assert_eq!(parse_ollama_context(&arch), 32768);
+    }
+
+    #[test]
+    fn parse_model_context_from_each_host() {
+        let openrouter = json!({
+            "data": [{
+                "id": "anthropic/claude-sonnet-4",
+                "context_length": 200000,
+                "top_provider": { "context_length": 128000 }
+            }]
+        });
+        assert_eq!(
+            parse_model_context(&openrouter, "anthropic/claude-sonnet-4"),
+            128000
+        );
+        let grok = json!({
+            "data": [{ "id": "grok-4.6", "context_length": 500000 }]
+        });
+        assert_eq!(parse_model_context(&grok, "grok-4.6"), 500000);
+        let catalog = json!({
+            "models": [{
+                "slug": "gpt-5.3-codex",
+                "context_window": 272000,
+                "max_context_window": 400000
+            }]
+        });
+        assert_eq!(parse_model_context(&catalog, "gpt-5.3-codex"), 272000);
+        let openai = json!({
+            "data": [{ "id": "gpt-5", "object": "model" }]
+        });
+        assert_eq!(parse_model_context(&openai, "gpt-5"), 0);
     }
 
     #[test]
