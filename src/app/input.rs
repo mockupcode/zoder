@@ -35,6 +35,7 @@ impl App {
     }
 
     fn close_overlay(&mut self) {
+        self.want_model_picker = false;
         self.overlay = Overlay::None;
     }
 
@@ -222,6 +223,10 @@ impl App {
             self.handle_sessions_key(key);
             return;
         }
+        if self.overlay.is_models() {
+            self.handle_models_key(key);
+            return;
+        }
         match &mut self.overlay {
             Overlay::None | Overlay::Sessions(_) => {}
             Overlay::Help => {
@@ -247,19 +252,7 @@ impl App {
                 }
                 _ => self.overlay = Overlay::None,
             },
-            Overlay::Models { items, selected } => match key.code {
-                KeyCode::Esc => self.overlay = Overlay::None,
-                KeyCode::Up => step_index(selected, items.len(), false),
-                KeyCode::Down => step_index(selected, items.len(), true),
-                KeyCode::Enter => {
-                    if let Some(m) = items.get(*selected).cloned() {
-                        self.apply_model(m);
-                        self.toast("model updated");
-                    }
-                    self.overlay = Overlay::None;
-                }
-                _ => {}
-            },
+            Overlay::Models(_) => {}
             Overlay::Question {
                 options,
                 selected,
@@ -357,6 +350,11 @@ impl App {
     }
 
     pub(super) fn on_esc(&mut self) {
+        if self.want_model_picker {
+            self.want_model_picker = false;
+            self.toast("cancelled");
+            return;
+        }
         if self.running {
             self.cancel_turn();
             return;
@@ -513,6 +511,10 @@ impl App {
             self.mouse_sessions(ev);
             return;
         }
+        if self.overlay.is_models() {
+            self.mouse_models(ev);
+            return;
+        }
         let has_files = self.at_entries().is_some_and(|c| !c.is_empty());
         let has_slash = self.slash_items().is_some_and(|c| !c.is_empty());
         if (has_files && !has_slash) || has_slash {
@@ -532,6 +534,123 @@ impl App {
                 {
                     self.follow = true;
                     self.scroll.set(0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_models_key(&mut self, key: KeyEvent) {
+        enum Act {
+            Close,
+            Pick(usize),
+            None,
+        }
+        let n = self
+            .overlay
+            .models()
+            .map(|m| m.filtered().len())
+            .unwrap_or(0);
+        let Some(m) = self.overlay.models_mut() else {
+            return;
+        };
+        let act = match key.code {
+            KeyCode::Esc => {
+                if m.searching || !m.query.is_empty() {
+                    m.query.clear();
+                    m.searching = false;
+                    m.selected = 0;
+                    Act::None
+                } else {
+                    Act::Close
+                }
+            }
+            KeyCode::Up => {
+                m.step(n, false);
+                Act::None
+            }
+            KeyCode::Down => {
+                m.step(n, true);
+                Act::None
+            }
+            KeyCode::Enter => Act::Pick(m.selected),
+            KeyCode::Backspace if m.searching || !m.query.is_empty() => {
+                m.query.pop();
+                m.selected = 0;
+                if m.query.is_empty() {
+                    m.searching = false;
+                }
+                Act::None
+            }
+            KeyCode::Char(c) => {
+                let cmd = crate::layout::to_latin(c).unwrap_or_else(|| c.to_ascii_lowercase());
+                if !m.searching && cmd == '/' {
+                    m.searching = true;
+                    Act::None
+                } else {
+                    m.searching = true;
+                    m.query.push(c);
+                    m.selected = 0;
+                    Act::None
+                }
+            }
+            _ => Act::None,
+        };
+        match act {
+            Act::Close => self.close_overlay(),
+            Act::Pick(i) => {
+                let pick = self.overlay.models().and_then(|m| {
+                    m.filtered()
+                        .get(i)
+                        .map(|e| (e.provider.clone(), e.model.clone()))
+                });
+                self.overlay = Overlay::None;
+                if let Some((provider, model)) = pick {
+                    self.apply_provider_model(&provider, model);
+                }
+            }
+            Act::None => {}
+        }
+    }
+
+    fn mouse_models(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::ScrollUp => {
+                let n = self
+                    .overlay
+                    .models()
+                    .map(|m| m.filtered().len())
+                    .unwrap_or(0);
+                if let Some(m) = self.overlay.models_mut() {
+                    m.step(n, false);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                let n = self
+                    .overlay
+                    .models()
+                    .map(|m| m.filtered().len())
+                    .unwrap_or(0);
+                if let Some(m) = self.overlay.models_mut() {
+                    m.step(n, true);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let pos = Position::new(ev.column, ev.row);
+                if self.close_hit.get().is_some_and(|r| r.contains(pos)) {
+                    self.close_overlay();
+                    return;
+                }
+                if let Some(i) = self.pick_index(pos) {
+                    let pick = self.overlay.models().and_then(|m| {
+                        m.filtered()
+                            .get(i)
+                            .map(|e| (e.provider.clone(), e.model.clone()))
+                    });
+                    self.overlay = Overlay::None;
+                    if let Some((provider, model)) = pick {
+                        self.apply_provider_model(&provider, model);
+                    }
                 }
             }
             _ => {}

@@ -315,12 +315,42 @@ impl App {
         let _ = self.cfg.save();
     }
 
+    pub(super) fn apply_provider_model(&mut self, provider: &str, model: String) {
+        if !self.cfg.select_provider(provider) {
+            self.toast(format!("unknown provider {provider}"));
+            return;
+        }
+        self.cfg.set_model(model.clone());
+        self.client = crate::ollama::Client::from_config(&self.cfg);
+        self.session.model = model.clone();
+        let _ = self.cfg.save();
+        self.toast(format!("{provider} {model}"));
+    }
+
     pub(super) fn open_models(&mut self) {
-        let items = match &self.connected {
-            Some(Ok(v)) => v.clone(),
-            _ => vec![self.cfg.model().to_string()],
-        };
-        self.overlay = Overlay::Models { items, selected: 0 };
+        self.want_model_picker = true;
+        self.toast("fetching models");
+        let cfg = self.cfg.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut items = Vec::new();
+            for id in cfg.providers.keys() {
+                let mut one = cfg.clone();
+                if !one.select_provider(id) {
+                    continue;
+                }
+                let client = crate::ollama::Client::from_config(&one);
+                if let Ok(models) = client.probe().await {
+                    for model in models {
+                        items.push(crate::agent::ModelEntry {
+                            provider: id.clone(),
+                            model,
+                        });
+                    }
+                }
+            }
+            let _ = tx.send((0, crate::agent::AgentEvent::ModelCatalog(items)));
+        });
     }
 
     pub fn on_agent(&mut self, turn: u64, ev: AgentEvent) {
@@ -429,6 +459,21 @@ impl App {
                     }
                 }
                 self.connected = Some(Ok(models));
+            }
+            AgentEvent::ModelCatalog(items) => {
+                if !self.want_model_picker {
+                    return;
+                }
+                self.want_model_picker = false;
+                if items.is_empty() {
+                    self.toast("no models from any provider");
+                    return;
+                }
+                self.overlay = Overlay::Models(crate::app::ModelsOverlay::open(
+                    items,
+                    &self.cfg.provider,
+                    self.cfg.model(),
+                ));
             }
             AgentEvent::Done => {
                 self.running = false;

@@ -86,6 +86,10 @@ impl Client {
             ));
             extra_headers.push(("X-Title".into(), "zoder".into()));
         }
+        if cfg.host().contains("chatgpt.com") {
+            extra_headers.push(("originator".into(), "zoder".into()));
+            extra_headers.push(("OpenAI-Beta".into(), "responses=experimental".into()));
+        }
         Self {
             http,
             host: cfg.host().to_string(),
@@ -102,6 +106,10 @@ impl Client {
         self.kind == "openai"
     }
 
+    fn codex_backend(&self) -> bool {
+        self.host.contains("chatgpt.com")
+    }
+
     async fn auth_header(&self) -> Result<Option<String>, String> {
         if !self.openai() {
             return Ok(None);
@@ -109,6 +117,18 @@ impl Client {
         Ok(Some(
             crate::auth::bearer_for(&self.provider, &self.api_key_env, &self.auth).await?,
         ))
+    }
+
+    fn with_auth(&self, mut req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+        req = req.bearer_auth(token);
+        for (k, v) in &self.extra_headers {
+            req = req.header(k, v);
+        }
+        let acc = crate::auth::account_id(&self.provider);
+        if !acc.is_empty() {
+            req = req.header("chatgpt-account-id", acc);
+        }
+        req
     }
 
     pub async fn probe(&self) -> Result<Vec<String>, String> {
@@ -134,11 +154,11 @@ impl Client {
             .auth_header()
             .await?
             .ok_or_else(|| "no token".to_string())?;
-        let url = format!("{}/models", self.host.trim_end_matches('/'));
-        let mut req = self.http.get(&url).bearer_auth(&token);
-        for (k, v) in &self.extra_headers {
-            req = req.header(k, v);
+        let mut url = format!("{}/models", self.host.trim_end_matches('/'));
+        if self.codex_backend() {
+            url.push_str("?client_version=999.0.0");
         }
+        let req = self.with_auth(self.http.get(&url), &token);
         let res = req.send().await.map_err(|e| e.to_string())?;
         if res.status().as_u16() == 401 {
             return Err("not signed in — zoder provider add".into());
@@ -147,16 +167,7 @@ impl Client {
             return Err(format!("status {}", res.status()));
         }
         let body: Value = res.json().await.map_err(|e| e.to_string())?;
-        let ids = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(ids)
+        Ok(parse_model_ids(&body))
     }
 
     pub async fn stream_chat(
@@ -168,6 +179,11 @@ impl Client {
         on_chunk: impl FnMut(ChatChunk),
     ) -> anyhow::Result<(String, String, Vec<ToolCall>, u32, u32)> {
         if self.openai() {
+            if self.codex_backend() {
+                return self
+                    .stream_responses(messages, tools, cancel, on_chunk)
+                    .await;
+            }
             return self.stream_openai(messages, tools, cancel, on_chunk).await;
         }
         self.stream_ollama(messages, tools, think, cancel, on_chunk)
@@ -289,10 +305,7 @@ impl Client {
         if !tools.is_null() && tools.as_array().is_none_or(|a| !a.is_empty()) {
             body["tools"] = tools.clone();
         }
-        let mut req = self.http.post(&url).bearer_auth(&token).json(&body);
-        for (k, v) in &self.extra_headers {
-            req = req.header(k, v);
-        }
+        let req = self.with_auth(self.http.post(&url).json(&body), &token);
         let res = req.send().await?;
         if !res.status().is_success() {
             let t = res.text().await.unwrap_or_default();
@@ -375,6 +388,154 @@ impl Client {
                         eval_count: None,
                         error: None,
                     });
+                }
+            }
+        }
+        let calls = finish_calls(acc);
+        Ok((content, thinking, calls, prompt_tokens, eval_tokens))
+    }
+
+    async fn stream_responses(
+        &self,
+        messages: &[ChatMessage],
+        tools: &Value,
+        cancel: &AtomicBool,
+        mut on_chunk: impl FnMut(ChatChunk),
+    ) -> anyhow::Result<(String, String, Vec<ToolCall>, u32, u32)> {
+        let token = self
+            .auth_header()
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("no token"))?;
+        let (instructions, input) = responses_input(messages);
+        let mut body = json!({
+            "model": self.model,
+            "input": input,
+            "stream": true,
+            "store": false,
+        });
+        if !instructions.is_empty() {
+            body["instructions"] = json!(instructions);
+        }
+        let rtools = responses_tools(tools);
+        if !rtools.is_empty() {
+            body["tools"] = json!(rtools);
+        }
+        let url = format!("{}/responses", self.host.trim_end_matches('/'));
+        let req = self.with_auth(self.http.post(&url).json(&body), &token);
+        let res = req.send().await?;
+        if !res.status().is_success() {
+            let t = res.text().await.unwrap_or_default();
+            anyhow::bail!("chat failed: {t}");
+        }
+        let mut stream = res.bytes_stream();
+        let mut buf = String::new();
+        let mut content = String::new();
+        let mut thinking = String::new();
+        let mut acc: Vec<OaiCall> = Vec::new();
+        let mut prompt_tokens = 0u32;
+        let mut eval_tokens = 0u32;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("cancelled");
+            }
+            let item = tokio::select! {
+                item = stream.next() => item,
+                _ = wait_cancel(cancel) => anyhow::bail!("cancelled"),
+            };
+            let Some(item) = item else {
+                break;
+            };
+            buf.push_str(&String::from_utf8_lossy(&item?));
+            for (ev, data) in take_sse(&mut buf) {
+                if data == "[DONE]" {
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                if let Some(err) = v.get("error") {
+                    let msg = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("chat failed");
+                    anyhow::bail!("{msg}");
+                }
+                let kind = if ev.is_empty() {
+                    v.get("type").and_then(|t| t.as_str()).unwrap_or("")
+                } else {
+                    ev.as_str()
+                };
+                match kind {
+                    "response.output_text.delta" => {
+                        let piece = text_of(v.get("delta"));
+                        if !piece.is_empty() {
+                            content.push_str(&piece);
+                            on_chunk(ChatChunk {
+                                message: ChunkMessage {
+                                    role: "assistant".into(),
+                                    content: piece,
+                                    thinking: String::new(),
+                                    tool_calls: Vec::new(),
+                                },
+                                done: false,
+                                prompt_eval_count: None,
+                                eval_count: None,
+                                error: None,
+                            });
+                        }
+                    }
+                    "response.reasoning_summary_text.delta"
+                    | "response.reasoning_text.delta"
+                    | "response.reasoning.delta" => {
+                        let think = text_of(v.get("delta"));
+                        if !think.is_empty() {
+                            thinking.push_str(&think);
+                            on_chunk(ChatChunk {
+                                message: ChunkMessage {
+                                    role: "assistant".into(),
+                                    content: String::new(),
+                                    thinking: think,
+                                    tool_calls: Vec::new(),
+                                },
+                                done: false,
+                                prompt_eval_count: None,
+                                eval_count: None,
+                                error: None,
+                            });
+                        }
+                    }
+                    "response.output_item.added" | "response.output_item.done" => {
+                        apply_response_item(&mut acc, v.get("item"));
+                    }
+                    "response.function_call_arguments.delta" => {
+                        let delta = text_of(v.get("delta"));
+                        if delta.is_empty() {
+                            continue;
+                        }
+                        if let Some(last) = acc.last_mut() {
+                            last.arguments.push_str(&delta);
+                        } else {
+                            acc.push(OaiCall {
+                                arguments: delta,
+                                ..OaiCall::default()
+                            });
+                        }
+                    }
+                    "response.completed" | "response.incomplete" => {
+                        if let Some(u) = v.pointer("/response/usage") {
+                            prompt_tokens = num(u, "input_tokens");
+                            eval_tokens = num(u, "output_tokens");
+                        }
+                    }
+                    "response.failed" => {
+                        let msg = v
+                            .pointer("/response/error/message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("chat failed");
+                        anyhow::bail!("{msg}");
+                    }
+                    _ => {}
                 }
             }
         }
@@ -544,6 +705,195 @@ fn openai_tool_calls(raw: &Value) -> Vec<Value> {
         .collect()
 }
 
+pub(crate) fn responses_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
+    let mut instructions = String::new();
+    let mut input = Vec::new();
+    let mut pending_ids: Vec<String> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        match m.role.as_str() {
+            "system" => {
+                if !instructions.is_empty() {
+                    instructions.push('\n');
+                }
+                instructions.push_str(m.content.as_deref().unwrap_or(""));
+            }
+            "tool" => {
+                let id = if pending_ids.is_empty() {
+                    format!("call-{i}")
+                } else {
+                    pending_ids.remove(0)
+                };
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": id,
+                    "output": m.content.clone().unwrap_or_default(),
+                }));
+            }
+            "assistant" => {
+                pending_ids.clear();
+                if let Some(tc) = &m.tool_calls {
+                    for c in openai_tool_calls(tc) {
+                        let id = c
+                            .get("id")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = c
+                            .pointer("/function/name")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        let args = c
+                            .pointer("/function/arguments")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("{}");
+                        pending_ids.push(id.clone());
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": id,
+                            "name": name,
+                            "arguments": args,
+                        }));
+                    }
+                }
+                if let Some(text) = &m.content {
+                    if !text.is_empty() {
+                        input.push(json!({
+                            "role": "assistant",
+                            "content": text,
+                        }));
+                    }
+                }
+            }
+            other => {
+                pending_ids.clear();
+                input.push(json!({
+                    "role": other,
+                    "content": m.content.clone().unwrap_or_default(),
+                }));
+            }
+        }
+    }
+    (instructions, input)
+}
+
+fn responses_tools(tools: &Value) -> Vec<Value> {
+    let Some(arr) = tools.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let fn_ = t.get("function")?;
+            Some(json!({
+                "type": "function",
+                "name": fn_.get("name")?,
+                "description": fn_.get("description").cloned().unwrap_or(json!("")),
+                "parameters": fn_.get("parameters").cloned().unwrap_or(json!({})),
+            }))
+        })
+        .collect()
+}
+
+fn apply_response_item(acc: &mut Vec<OaiCall>, item: Option<&Value>) {
+    let Some(item) = item else {
+        return;
+    };
+    if item.get("type").and_then(|t| t.as_str()) != Some("function_call") {
+        return;
+    }
+    let name = item
+        .get("name")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let args = item
+        .get("arguments")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Some(existing) = acc.iter_mut().find(|c| !id.is_empty() && c.id == id) {
+        if !name.is_empty() {
+            existing.name = name;
+        }
+        if !args.is_empty() {
+            existing.arguments = args;
+        }
+        return;
+    }
+    if name.is_empty() && args.is_empty() {
+        return;
+    }
+    acc.push(OaiCall {
+        id,
+        name,
+        arguments: args,
+    });
+}
+
+pub(crate) fn parse_model_ids(body: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
+        for m in arr {
+            if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                if !id.is_empty() {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(arr) = body.get("models").and_then(|d| d.as_array()) {
+            for m in arr {
+                if let Some(vis) = m.get("visibility").and_then(|v| v.as_str()) {
+                    if vis != "list" {
+                        continue;
+                    }
+                }
+                let id = m
+                    .get("slug")
+                    .or_else(|| m.get("id"))
+                    .or_else(|| m.get("name"))
+                    .and_then(|s| s.as_str());
+                if let Some(id) = id {
+                    if !id.is_empty() {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn take_sse(buf: &mut String) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    while let Some(idx) = buf.find("\n\n") {
+        let block = buf[..idx].to_string();
+        buf.drain(..idx + 2);
+        let mut ev = String::new();
+        let mut data = String::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("event:") {
+                ev = rest.trim().to_string();
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(rest.trim());
+            }
+        }
+        if !data.is_empty() {
+            out.push((ev, data));
+        }
+    }
+    out
+}
+
 async fn wait_cancel(flag: &AtomicBool) {
     loop {
         if flag.load(Ordering::Relaxed) {
@@ -597,5 +947,45 @@ mod tests {
         assert_eq!(out[1]["tool_calls"][0]["type"], "function");
         assert!(out[1]["tool_calls"][0]["function"]["arguments"].is_string());
         assert_eq!(out[2]["tool_call_id"], out[1]["tool_calls"][0]["id"]);
+    }
+
+    #[test]
+    fn responses_input_maps_tools() {
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant(
+                String::new(),
+                None,
+                Some(json!([{"function":{"name":"view","arguments":{"file_path":"a.rs"}}}])),
+            ),
+            ChatMessage::tool("view", "ok"),
+        ];
+        let (ins, input) = responses_input(&msgs);
+        assert_eq!(ins, "sys");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["name"], "view");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], input[1]["call_id"]);
+    }
+
+    #[test]
+    fn parse_openai_and_codex_model_lists() {
+        let openai = json!({"data":[{"id":"gpt-5.3-codex"},{"id":"gpt-4o"}]});
+        assert_eq!(
+            parse_model_ids(&openai),
+            vec!["gpt-5.3-codex".to_string(), "gpt-4o".to_string()]
+        );
+        let catalog = json!({
+            "models": [
+                {"slug":"gpt-5.3-codex","visibility":"list"},
+                {"slug":"hidden","visibility":"internal"},
+                {"slug":"gpt-5.1-codex","visibility":"list"}
+            ]
+        });
+        assert_eq!(
+            parse_model_ids(&catalog),
+            vec!["gpt-5.3-codex".to_string(), "gpt-5.1-codex".to_string()]
+        );
     }
 }

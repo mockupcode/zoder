@@ -50,13 +50,14 @@ async fn add() -> anyhow::Result<()> {
     let mut input = io::stdin().lock();
     writeln!(
         out,
-        "Add a provider\n  1) grok         device sign-in or API key\n  2) openrouter   API key\n  3) ollama       local host"
+        "Add a provider\n  1) grok         device sign-in or API key\n  2) openrouter   API key\n  3) codex        device sign-in or API key\n  4) ollama       local host"
     )?;
     let choice = prompt(&mut input, &mut out, "> ")?;
-    let (id, p) = match choice.as_str() {
+    let (id, mut p) = match choice.as_str() {
         "1" | "grok" => preset_grok(),
         "2" | "openrouter" => preset_openrouter(),
-        "3" | "ollama" | "local" => {
+        "3" | "codex" => preset_codex(),
+        "4" | "ollama" | "local" => {
             let host = prompt(&mut input, &mut out, "host [http://127.0.0.1:11434]: ")?;
             let host = if host.is_empty() {
                 config::FALLBACK_HOST.to_string()
@@ -81,7 +82,7 @@ async fn add() -> anyhow::Result<()> {
                 },
             )
         }
-        _ => anyhow::bail!("pick 1, 2, or 3"),
+        _ => anyhow::bail!("pick 1, 2, 3, or 4"),
     };
 
     let mut cfg = Config::load().unwrap_or_default();
@@ -99,6 +100,9 @@ async fn add() -> anyhow::Result<()> {
             match how.as_str() {
                 "1" | "device" => device_login(&id).await?,
                 "2" | "key" | "api" | "api key" | "api_key" => {
+                    if id == "codex" {
+                        p.host = "https://api.openai.com/v1".into();
+                    }
                     paste_key(&mut input, &mut out, &id, &p.api_key_env)?
                 }
                 _ => anyhow::bail!("pick 1 or 2"),
@@ -160,6 +164,20 @@ fn preset_grok() -> (String, Provider) {
     )
 }
 
+fn preset_codex() -> (String, Provider) {
+    (
+        "codex".into(),
+        Provider {
+            kind: "openai".into(),
+            host: "https://chatgpt.com/backend-api/codex".into(),
+            model: "gpt-5.3-codex".into(),
+            models: Vec::new(),
+            auth: "device".into(),
+            api_key_env: "OPENAI_API_KEY".into(),
+        },
+    )
+}
+
 fn preset_openrouter() -> (String, Provider) {
     (
         "openrouter".into(),
@@ -200,14 +218,24 @@ fn paste_key(
 }
 
 async fn device_login(id: &str) -> anyhow::Result<()> {
-    let pending = auth::request_device().await?;
+    let pending = if id == "codex" {
+        auth::request_codex_device().await?
+    } else {
+        auth::request_device().await?
+    };
     println!("Open this URL:\n  {}", pending.verification_uri);
     println!("Code: {}", pending.user_code);
     println!("Waiting for approval (ctrl+c to cancel)…");
     auth::open_url(&pending.verification_uri);
     let cancel = AtomicBool::new(false);
     tokio::select! {
-        r = auth::complete_device(id, pending, &cancel) => r?,
+        r = async {
+            if id == "codex" {
+                auth::complete_codex_device(id, pending, &cancel).await
+            } else {
+                auth::complete_device(id, pending, &cancel).await
+            }
+        } => r?,
         _ = tokio::signal::ctrl_c() => anyhow::bail!("cancelled"),
     }
     println!("signed in");

@@ -5,7 +5,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Overlay, SessionsOverlay};
+use crate::app::{App, ModelsOverlay, Overlay, SessionsOverlay};
 use crate::session::Session;
 use crate::text::{truncate_width, wrap_plain};
 use crate::theme::Theme;
@@ -30,7 +30,7 @@ pub(super) fn draw_overlay(frame: &mut Frame, app: &App) {
             "press ctrl+n again or enter · discards nothing already saved",
         ),
         Overlay::Sessions(s) => sessions(frame, app, s),
-        Overlay::Models { items, selected } => models(frame, app, th, items, *selected),
+        Overlay::Models(m) => models(frame, app, m),
         Overlay::Question {
             prompt,
             hint,
@@ -328,17 +328,22 @@ fn resume_search(
     } else {
         "   / to search".into()
     };
-    let right_w = chip.width() + 6; // "chip f    "
+    let mut right: Vec<Span> = Vec::new();
+    if !chip.is_empty() {
+        right.push(Span::styled(format!("{chip} "), th.mute()));
+        right.push(Span::styled("f", th.mute()));
+        right.push(Span::styled("    ", th.base()));
+    }
+    let right_w = crate::text::spans_width(&right);
     let gap = inner_w.saturating_sub(left.width() + right_w);
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled("│", border),
         Span::styled(left, th.mute()),
         Span::styled(" ".repeat(gap), th.base()),
-        Span::styled(format!("{chip} "), th.mute()),
-        Span::styled("f", th.mute()),
-        Span::styled("    ", th.base()),
-        Span::styled("│", border),
-    ])
+    ];
+    spans.extend(right);
+    spans.push(Span::styled("│", border));
+    Line::from(spans)
 }
 
 fn group_row(label: &str, inner_w: usize, th: Theme) -> Line<'static> {
@@ -413,33 +418,150 @@ fn session_row(
     }
 }
 
-fn models(frame: &mut Frame, app: &App, th: Theme, items: &[String], selected: usize) {
-    let body: Vec<(Line, bool)> = items
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            if i == selected {
-                (
-                    Line::from(Span::styled(format!("  ❯ {m}"), th.selected())),
-                    true,
-                )
-            } else {
-                (
-                    Line::from(Span::styled(format!("    {m}"), th.base())),
-                    false,
-                )
+fn models(frame: &mut Frame, app: &App, picker: &ModelsOverlay) {
+    let th = app.theme;
+    let full = frame.area();
+    let border = Style::default().fg(th.fg_mute).bg(th.bg);
+    let box_w = 120u16.min(full.width.saturating_sub(4)).max(40);
+    let box_x = full.x + (full.width.saturating_sub(box_w)) / 2;
+    let wrap_w = full.width.saturating_sub(8).max(8) as usize;
+    let ch = (wrap_plain(&app.composer.text, wrap_w).len().clamp(1, 8) as u16) + 2;
+    let composer_y = full.height.saturating_sub(3 + ch);
+    let box_y = 4u16.min(composer_y.saturating_sub(8));
+    let box_h = composer_y
+        .saturating_add(1)
+        .saturating_sub(box_y)
+        .saturating_add(1)
+        .max(10);
+    let area = Rect {
+        x: box_x,
+        y: box_y,
+        width: box_w,
+        height: box_h,
+    };
+    frame.render_widget(Clear, area);
+
+    let inner_w = box_w.saturating_sub(2) as usize;
+    let list = picker.filtered();
+    let mut body: Vec<(Line, Option<usize>)> = Vec::new();
+    let mut last_group: Option<String> = None;
+    if list.is_empty() {
+        body.push((Line::from(Span::styled("  no models", th.mute())), None));
+    }
+    for (i, e) in list.iter().enumerate() {
+        if last_group.as_deref() != Some(e.provider.as_str()) {
+            if last_group.is_some() {
+                body.push((Line::from(""), None));
             }
-        })
-        .collect();
-    paint_card(
-        frame,
-        app,
+            body.push((group_row(&e.provider, inner_w, th), None));
+            last_group = Some(e.provider.clone());
+        }
+        body.push((
+            model_row(&e.model, i == picker.selected, inner_w, th),
+            Some(i),
+        ));
+    }
+
+    let inner_rows = box_h.saturating_sub(2) as usize;
+    let list_h = inner_rows.saturating_sub(4).max(1);
+    let sel_line = body
+        .iter()
+        .position(|(_, idx)| *idx == Some(picker.selected))
+        .unwrap_or(0);
+    let start = (sel_line + 1).saturating_sub(list_h);
+    let end = (start + list_h).min(body.len());
+    let visible = if start < end { &body[start..end] } else { &[] };
+
+    let mut lines: Vec<Line> = vec![
+        overlay_top(box_w as usize, "model", th),
+        sided(Line::from(""), inner_w, th, border, false),
+        resume_search(&picker.query, picker.searching, "", inner_w, th, border),
+        sided(
+            Line::from(Span::styled("─".repeat(inner_w), border)),
+            inner_w,
+            th,
+            border,
+            false,
+        ),
+    ];
+
+    let mut hits: Vec<(Rect, usize)> = Vec::new();
+    let list_y = box_y + 4;
+    for (row, (line, idx)) in visible.iter().enumerate() {
+        lines.push(sided(
+            line.clone(),
+            inner_w,
+            th,
+            border,
+            idx.is_some_and(|i| i == picker.selected),
+        ));
+        if let Some(i) = idx {
+            hits.push((
+                Rect {
+                    x: box_x + 1,
+                    y: list_y + row as u16,
+                    width: inner_w as u16,
+                    height: 1,
+                },
+                *i,
+            ));
+        }
+    }
+    while lines.len() + 2 < box_h as usize {
+        lines.push(sided(Line::from(""), inner_w, th, border, false));
+    }
+    lines.push(overlay_keys(
+        inner_w,
+        &[
+            ("↑↓", "nav"),
+            ("enter", "select"),
+            ("/", "search"),
+            ("esc", "close"),
+        ],
         th,
-        "model",
-        56,
-        body,
-        &[("↑↓", "nav"), ("enter", "select"), ("esc", "close")],
-    );
+        border,
+    ));
+    lines.push(overlay_bottom(inner_w, border));
+
+    frame.render_widget(Paragraph::new(lines).style(th.base()), area);
+    app.pick_hits.set(hits);
+    app.close_hit.set(Some(Rect {
+        x: box_x + box_w.saturating_sub(6),
+        y: box_y,
+        width: 3,
+        height: 1,
+    }));
+}
+
+fn model_row(name: &str, selected: bool, inner_w: usize, th: Theme) -> Line<'static> {
+    let inset = "  ";
+    let chev = "› ";
+    let hl_w = inner_w.saturating_sub(4);
+    let hl_prefix = format!("  {chev}");
+    let title_w = hl_w.saturating_sub(hl_prefix.width()).max(1);
+    let title = truncate_width(name, title_w);
+    let gap = hl_w.saturating_sub(hl_prefix.width() + title.width());
+    let sel_dim = Style::default().fg(th.fg_dim).bg(th.bg_sel);
+    if selected {
+        Line::from(vec![
+            Span::styled(inset.to_string(), th.base()),
+            Span::styled("  ".to_string(), th.selected()),
+            Span::styled(chev, sel_dim),
+            Span::styled(
+                format!("{title}{}", " ".repeat(gap)),
+                th.selected().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(inset.to_string(), th.base()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!("{inset}  "), th.base()),
+            Span::styled(chev, th.dim()),
+            Span::styled(title, th.base().add_modifier(Modifier::BOLD)),
+            Span::styled(" ".repeat(gap), th.base()),
+            Span::styled(inset.to_string(), th.base()),
+        ])
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

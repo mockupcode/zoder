@@ -47,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .split(frame.area());
 
     draw_header(frame, app, chunks[1]);
-    let resume = app.overlay.is_sessions();
+    let resume = app.overlay.is_sessions() || app.overlay.is_models();
     if !resume {
         match app.screen {
             Screen::Welcome => {
@@ -88,7 +88,8 @@ mod tests {
     use ratatui::Terminal;
 
     use super::*;
-    use crate::app::{Overlay, SessionsOverlay};
+    use crate::agent::ModelEntry;
+    use crate::app::{ModelsOverlay, Overlay, SessionsOverlay};
     use crate::session::{Block, ToolStatus};
 
     fn demo() -> App {
@@ -227,6 +228,62 @@ mod tests {
         assert!(s.contains("push_rows"), "{s}");
         assert!(s.contains("141"), "{s}");
         assert!(!s.contains("│ fn push_rows"), "{s}");
+    }
+
+    #[test]
+    fn model_picker_keeps_right_border() {
+        let mut app = demo();
+        app.overlay = Overlay::Models(ModelsOverlay::open(
+            vec![
+                ModelEntry {
+                    provider: "grok".into(),
+                    model: "grok-imagine-video-1.5".into(),
+                },
+                ModelEntry {
+                    provider: "ollama".into(),
+                    model: "qwen3-coder-next:80b".into(),
+                },
+            ],
+            "grok",
+            "grok-imagine-video-1.5",
+        ));
+        let backend = TestBackend::new(120, 36);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        let mut top = None;
+        for y in 0..36u16 {
+            for x in 0..120u16 {
+                if buf[(x, y)].symbol() == "┌" {
+                    top = Some((x, y));
+                    break;
+                }
+            }
+            if top.is_some() {
+                break;
+            }
+        }
+        let (x0, y0) = top.expect("overlay top-left");
+        let mut x1 = x0;
+        for x in x0..120 {
+            if buf[(x, y0)].symbol() == "┐" {
+                x1 = x;
+            }
+        }
+        assert!(x1 > x0, "missing top-right corner");
+        let mut y = y0;
+        loop {
+            let ch = buf[(x1, y)].symbol();
+            assert!(
+                matches!(ch, "┐" | "│" | "┘"),
+                "right border broken at row {y}: {ch:?}"
+            );
+            if ch == "┘" {
+                break;
+            }
+            y += 1;
+            assert!(y < 36, "overlay never closed on the right");
+        }
     }
 
     #[test]

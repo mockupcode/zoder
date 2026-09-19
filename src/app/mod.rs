@@ -44,10 +44,7 @@ pub enum Overlay {
     None,
     Help,
     Sessions(SessionsOverlay),
-    Models {
-        items: Vec<String>,
-        selected: usize,
-    },
+    Models(ModelsOverlay),
     Question {
         prompt: String,
         hint: String,
@@ -58,6 +55,69 @@ pub enum Overlay {
     },
     QuitConfirm,
     NewConfirm,
+}
+
+const MODELS_PREVIEW_PER_PROVIDER: usize = 5;
+
+#[derive(Debug, Clone)]
+pub struct ModelsOverlay {
+    pub items: Vec<crate::agent::ModelEntry>,
+    pub query: String,
+    pub selected: usize,
+    pub searching: bool,
+    active_provider: String,
+    active_model: String,
+}
+
+impl ModelsOverlay {
+    pub fn open(items: Vec<crate::agent::ModelEntry>, provider: &str, model: &str) -> Self {
+        let mut overlay = Self {
+            items,
+            query: String::new(),
+            selected: 0,
+            searching: false,
+            active_provider: provider.to_string(),
+            active_model: model.to_string(),
+        };
+        overlay.selected = overlay
+            .filtered()
+            .iter()
+            .position(|e| e.provider == provider && e.model == model)
+            .unwrap_or(0);
+        overlay
+    }
+
+    pub fn filtered(&self) -> Vec<&crate::agent::ModelEntry> {
+        if !self.query.is_empty() {
+            return self
+                .items
+                .iter()
+                .filter(|e| {
+                    let hay = format!("{} {}", e.provider, e.model);
+                    crate::slash::match_indices(&hay, &self.query).is_some()
+                })
+                .collect();
+        }
+        let mut n_for: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        let mut out = Vec::new();
+        for e in &self.items {
+            let n = n_for.entry(e.provider.as_str()).or_insert(0);
+            let current = e.provider == self.active_provider && e.model == self.active_model;
+            if *n < MODELS_PREVIEW_PER_PROVIDER {
+                out.push(e);
+                *n += 1;
+            } else if current {
+                if let Some(last) = out.iter_mut().rev().find(|x| x.provider == e.provider) {
+                    *last = e;
+                }
+            }
+        }
+        out
+    }
+
+    fn step(&mut self, n: usize, down: bool) {
+        step_index(&mut self.selected, n, down);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +165,24 @@ impl Overlay {
             _ => None,
         }
     }
+
+    pub fn is_models(&self) -> bool {
+        matches!(self, Self::Models(_))
+    }
+
+    pub fn models(&self) -> Option<&ModelsOverlay> {
+        match self {
+            Self::Models(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn models_mut(&mut self) -> Option<&mut ModelsOverlay> {
+        match self {
+            Self::Models(m) => Some(m),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn step_index(sel: &mut usize, n: usize, down: bool) {
@@ -140,6 +218,7 @@ pub struct App {
     pub toast: Option<(String, u8)>,
     pub tick: u64,
     pub connected: Option<Result<Vec<String>, String>>,
+    pub(crate) want_model_picker: bool,
     pub slash_sel: usize,
     pub file_sel: usize,
     pub running: bool,
@@ -249,6 +328,7 @@ impl App {
             toast: None,
             tick: 0,
             connected: None,
+            want_model_picker: false,
             slash_sel: 0,
             file_sel: 0,
             running: false,
@@ -410,6 +490,50 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('\u{1b}'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('\u{7}'), KeyModifiers::NONE));
         assert_eq!(app.composer.text, "");
+    }
+
+    #[test]
+    fn model_search_filters_provider_and_name() {
+        let ov = ModelsOverlay::open(
+            vec![
+                crate::agent::ModelEntry {
+                    provider: "grok".into(),
+                    model: "grok-4.5".into(),
+                },
+                crate::agent::ModelEntry {
+                    provider: "openrouter".into(),
+                    model: "anthropic/claude-sonnet-4".into(),
+                },
+            ],
+            "grok",
+            "grok-4.5",
+        );
+        let mut ov = ov;
+        ov.query = "claude".into();
+        let f = ov.filtered();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].provider, "openrouter");
+    }
+
+    #[test]
+    fn model_preview_caps_until_search() {
+        let items: Vec<_> = (0..20)
+            .map(|i| crate::agent::ModelEntry {
+                provider: "openrouter".into(),
+                model: format!("m{i:02}"),
+            })
+            .collect();
+        let mut ov = ModelsOverlay::open(items, "openrouter", "m19");
+        assert_eq!(ov.filtered().len(), 5);
+        assert!(
+            ov.filtered().iter().any(|e| e.model == "m19"),
+            "current model stays visible"
+        );
+        ov.query = "m19".into();
+        assert_eq!(ov.filtered().len(), 1);
+        assert_eq!(ov.filtered()[0].model, "m19");
+        ov.query = "m".into();
+        assert_eq!(ov.filtered().len(), 20);
     }
 
     #[test]

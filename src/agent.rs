@@ -46,6 +46,12 @@ impl RepeatGuard {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelEntry {
+    pub provider: String,
+    pub model: String,
+}
+
 pub enum AgentEvent {
     ThinkingDelta(String),
     ContentDelta(String),
@@ -68,6 +74,7 @@ pub enum AgentEvent {
     Todos(Vec<crate::session::Todo>),
     SyncMessages(Vec<ChatMessage>),
     HostModels(Vec<String>),
+    ModelCatalog(Vec<ModelEntry>),
     Status(String),
     Usage {
         prompt: u32,
