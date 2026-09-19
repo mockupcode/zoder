@@ -12,10 +12,10 @@ use crate::agent::AgentEvent;
 use crate::composer::Composer;
 use crate::config::Config;
 use crate::ollama::Client;
-use crate::session::{AgentMode, Session, SessionMeta};
+use crate::session::{Session, SessionMeta};
 use crate::theme::Theme;
 use crate::tools::{self, FileHit};
-use crate::ui::{ChatCache, PlanCache};
+use crate::ui::ChatCache;
 
 mod input;
 mod turn;
@@ -47,12 +47,6 @@ pub enum Overlay {
     Models {
         items: Vec<String>,
         selected: usize,
-    },
-    Permission {
-        name: String,
-        detail: String,
-        selected: usize,
-        reply: Option<oneshot::Sender<bool>>,
     },
     Question {
         prompt: String,
@@ -167,7 +161,6 @@ pub struct App {
     /// Escape-sequence tail that leaked in as plain characters after a lone ESC.
     pub(crate) residue: Option<Residue>,
     pub chat_cache: RefCell<ChatCache>,
-    pub plan_cache: RefCell<PlanCache>,
     pub at_cache: RefCell<AtCache>,
 }
 
@@ -226,11 +219,6 @@ impl App {
         let cwd = std::env::current_dir()?;
         let client = Client::from_config(&cfg);
         let mut session = Session::new(cwd.clone(), cfg.model().to_string());
-        session.mode = if cfg.always_approve {
-            AgentMode::Always
-        } else {
-            AgentMode::Normal
-        };
         let sessions = Session::list(&cwd);
         let branch = git_branch(&cwd);
         let mut screen = Screen::Welcome;
@@ -280,7 +268,6 @@ impl App {
             dirty: true,
             residue: None,
             chat_cache: RefCell::new(ChatCache::default()),
-            plan_cache: RefCell::new(PlanCache::default()),
             at_cache: RefCell::new(AtCache::default()),
         })
     }
@@ -443,16 +430,6 @@ mod tests {
             app.on_tick();
         }
         assert!(app.wants_draw());
-    }
-
-    #[test]
-    fn shift_tab_cycles_mode() {
-        let mut app = App::demo();
-        assert_eq!(app.session.mode, AgentMode::Normal);
-        app.cycle_mode();
-        assert_eq!(app.session.mode, AgentMode::Plan);
-        app.cycle_mode();
-        assert_eq!(app.session.mode, AgentMode::Always);
     }
 
     #[test]

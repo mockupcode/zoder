@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::agent::{self, AgentEvent, TurnInput};
 use crate::composer::DraftKind;
-use crate::session::{AgentMode, Block, Session, SessionMeta, ToolStatus};
+use crate::session::{Block, Session, SessionMeta, ToolStatus};
 use crate::tools;
 
 use super::{clock, App, Focus, Overlay, Screen, SessionsOverlay};
@@ -92,11 +92,7 @@ impl App {
             text: text.clone(),
             time: clock(),
         });
-        let sys = agent::system_prompt(
-            &self.session.cwd,
-            self.session.mode,
-            &self.session.plan_path(),
-        );
+        let sys = agent::system_prompt(&self.session.cwd);
         if self.session.messages.is_empty() {
             self.session
                 .messages
@@ -121,11 +117,7 @@ impl App {
         let input = TurnInput {
             client: self.client.clone(),
             messages: self.session.messages.clone(),
-            mode: self.session.mode,
             cwd: self.session.cwd.clone(),
-            session_dir: self.session.dir(),
-            plan_path: self.session.plan_path(),
-            always: self.session.mode == AgentMode::Always,
             cancel: self.cancel.clone(),
             turn: self.live_turn,
         };
@@ -156,8 +148,6 @@ impl App {
         self.thinking_started = None;
         if matches!(self.overlay, Overlay::Question { .. }) {
             self.answer_question("cancelled");
-        } else {
-            self.answer_perm(false);
         }
         for b in &mut self.session.blocks {
             match b {
@@ -190,24 +180,6 @@ impl App {
                 self.screen = Screen::Welcome;
                 self.focus = Focus::Prompt;
             }
-            "plan" => {
-                self.session.mode = AgentMode::Plan;
-                if rest.is_empty() {
-                    self.toast("plan mode — send a task");
-                } else {
-                    self.send_user(rest.to_string());
-                }
-            }
-            "view-plan" => {
-                self.show_todos = true;
-                let p = self.session.plan_path();
-                if let Ok(s) = std::fs::read_to_string(&p) {
-                    self.session.blocks.push(Block::Notice { text: s });
-                } else {
-                    self.toast("no plan written yet");
-                }
-            }
-            "always-approve" => self.cycle_always(),
             "status" => {
                 let n = self
                     .session
@@ -217,11 +189,10 @@ impl App {
                     .count();
                 self.session.blocks.push(Block::Notice {
                     text: format!(
-                        "cwd {}\nhost {}\nmodel {}\nmode {}\nturns {n}\ntokens {}/{}",
+                        "cwd {}\nhost {}\nmodel {}\nturns {n}\ntokens {}/{}",
                         self.session.cwd.display(),
                         self.cfg.host(),
                         self.session.model,
-                        self.session.mode.label(),
                         self.session.prompt_tokens,
                         self.session.eval_tokens
                     ),
@@ -352,14 +323,8 @@ impl App {
 
     pub fn on_agent(&mut self, turn: u64, ev: AgentEvent) {
         if turn != 0 && turn != self.live_turn {
-            match ev {
-                AgentEvent::NeedPermission { reply, .. } => {
-                    let _ = reply.send(false);
-                }
-                AgentEvent::NeedQuestion { reply, .. } => {
-                    let _ = reply.send("cancelled".into());
-                }
-                _ => {}
+            if let AgentEvent::NeedQuestion { reply, .. } = ev {
+                let _ = reply.send("cancelled".into());
             }
             return;
         }
@@ -427,19 +392,6 @@ impl App {
                     options,
                     selected: 0,
                     draft: String::new(),
-                    reply: Some(reply),
-                };
-            }
-            AgentEvent::NeedPermission {
-                name,
-                detail,
-                reply,
-                ..
-            } => {
-                self.overlay = Overlay::Permission {
-                    name,
-                    detail,
-                    selected: 0,
                     reply: Some(reply),
                 };
             }

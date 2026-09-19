@@ -2,7 +2,6 @@
 # Multiple providers can be listed; `provider` selects the active one.
 
 provider = "local"
-always_approve = false
 
 [providers.local]
 kind = "ollama"

@@ -10,7 +10,7 @@ use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde_json::{json, Value};
 
-use crate::session::{AgentMode, Session, Todo};
+use crate::session::{Session, Todo};
 
 pub use edit::parse_edit_diff;
 pub const EDIT_DIFF: &str = "DIFF";
@@ -443,20 +443,6 @@ pub fn canonicalize(name: &str) -> &str {
     }
 }
 
-pub fn needs_permission(name: &str) -> bool {
-    matches!(
-        canonicalize(name),
-        "bash"
-            | "write"
-            | "edit"
-            | "multiedit"
-            | "lsp_rename"
-            | "lsp_replace_symbol"
-            | "download"
-            | "fetch"
-    )
-}
-
 pub fn detail(name: &str, args: &Value) -> String {
     match canonicalize(name) {
         "view" | "write" | "edit" | "multiedit" | "ls" | "lsp_replace_symbol" => {
@@ -501,42 +487,6 @@ pub fn detail(name: &str, args: &Value) -> String {
             format!("{n} items")
         }
         _ => args.to_string(),
-    }
-}
-
-pub fn plan_forbidden(
-    mode: AgentMode,
-    name: &str,
-    args: &Value,
-    plan_path: &Path,
-) -> Option<String> {
-    if mode != AgentMode::Plan {
-        return None;
-    }
-    match canonicalize(name) {
-        "view" | "grep" | "glob" | "ls" | "todos" | "search" | "sourcegraph" | "job_output"
-        | "web_fetch" | "lsp_definition" | "lsp_symbols" | "references" | "lsp_call_hierarchy"
-        | "diagnostics" | "question" => None,
-        "bash" => {
-            Some("Plan mode is read-only. Shell is blocked until the plan is approved.".into())
-        }
-        "write" | "edit" | "multiedit" | "lsp_rename" | "lsp_replace_symbol" => {
-            let p = arg_str(args, "file_path")
-                .or_else(|| arg_str(args, "path"))
-                .unwrap_or("");
-            let resolved = PathBuf::from(p);
-            if resolved == plan_path
-                || Path::new(p).file_name() == Some(std::ffi::OsStr::new("plan.md"))
-            {
-                None
-            } else {
-                Some(format!(
-                    "Plan mode can only edit {}. Other writes are rejected.",
-                    plan_path.display()
-                ))
-            }
-        }
-        _ => None,
     }
 }
 
@@ -942,15 +892,6 @@ mod tests {
         assert!(glob_match("**/*.rs", "src/app.rs"));
         assert!(glob_match("*.rs", "app.rs"));
         assert!(!glob_match("*.rs", "src/app.rs"));
-    }
-
-    #[test]
-    fn plan_mode_blocks_shell() {
-        let p = PathBuf::from("/tmp/plan.md");
-        let msg = plan_forbidden(AgentMode::Plan, "bash", &json!({"command":"ls"}), &p);
-        assert!(msg.is_some());
-        let ok = plan_forbidden(AgentMode::Plan, "view", &json!({"file_path":"a.rs"}), &p);
-        assert!(ok.is_none());
     }
 
     #[test]

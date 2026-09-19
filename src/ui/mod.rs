@@ -6,7 +6,7 @@ use crate::app::{App, LayoutCache, Screen};
 use crate::text::wrap_plain;
 
 mod chat;
-pub(crate) use chat::{ChatCache, PlanCache};
+pub(crate) use chat::ChatCache;
 mod chrome;
 mod overlays;
 mod welcome;
@@ -119,7 +119,6 @@ mod tests {
         assert!(s.contains("Zoder"), "{s}");
         assert!(s.contains("Resume session"), "{s}");
         assert!(s.contains("demo-model"), "{s}");
-        assert!(s.contains("Shift+Tab:mode"), "{s}");
         assert!(s.contains("Ctrl+x:shortcuts"), "{s}");
         assert!(!s.contains("Enter:send"), "{s}");
         assert!(!s.to_lowercase().contains(concat!("gr", "ok")));
@@ -206,7 +205,7 @@ mod tests {
         assert!(s.contains("inspect the crate"), "{s}");
         assert!(s.contains("View"), "{s}");
         assert!(s.contains("Cargo.toml"), "{s}");
-        assert!(s.contains("Shift+Tab:mode"), "{s}");
+        assert!(s.contains("Ctrl+x:shortcuts"), "{s}");
         assert!(!s.contains("Enter:send"), "{s}");
     }
 
@@ -250,15 +249,12 @@ mod tests {
     fn footer_hints_follow_composer_state() {
         let mut app = demo();
         let empty = shot(&app, 120, 36);
-        assert!(
-            empty.contains("Shift+Tab:mode | Ctrl+x:shortcuts"),
-            "{empty}"
-        );
+        assert!(empty.contains("Ctrl+x:shortcuts"), "{empty}");
         assert!(!empty.contains("Enter:send"), "{empty}");
         app.composer.insert_str("hello");
         let typed = shot(&app, 120, 36);
         assert!(
-            typed.contains("Enter:send | Shift+Enter:newline | Shift+Tab:mode | Ctrl+x:shortcuts"),
+            typed.contains("Enter:send | Shift+Enter:newline | Ctrl+x:shortcuts"),
             "{typed}"
         );
         app.composer.clear();
@@ -329,7 +325,7 @@ mod tests {
         assert!(s.contains("/ search"), "{s}");
         assert!(s.contains("f filter"), "{s}");
         assert!(s.contains("d delete"), "{s}");
-        assert!(s.contains("demo-model · normal"), "{s}");
+        assert!(s.contains("demo-model"), "{s}");
         assert!(s.contains("┌"), "{s}");
         assert!(s.contains("└"), "{s}");
         assert!(s.contains("› Rust TUI") || s.contains("› IoT"), "{s}");
@@ -568,13 +564,13 @@ mod tests {
             "{s}"
         );
         assert!(!s.contains(" commands "), "{s}");
-        assert!(s.contains("/always-approve") || s.contains("/quit"), "{s}");
+        assert!(s.contains("/model"), "{s}");
 
         app.composer.clear();
-        app.composer.insert_str("/as");
+        app.composer.insert_str("/re");
         let s = shot(&app, 120, 36);
-        assert!(s.contains("/always-approve"), "{s}");
-        assert!(!s.contains("/new") || s.contains("/always-approve"), "{s}");
+        assert!(s.contains("/resume"), "{s}");
+        assert!(!s.contains("/new") || s.contains("/resume"), "{s}");
 
         use ratatui::style::Color;
         let backend = TestBackend::new(120, 36);
@@ -584,14 +580,14 @@ mod tests {
         let mut typed_fg = None;
         for y in 0..36u16 {
             for x in 0..120u16 {
-                if buf[(x, y)].symbol() == "a" {
+                if buf[(x, y)].symbol() == "r" {
                     let mut word = String::new();
                     for i in 0..2u16 {
                         if x + i < 120 {
                             word.push_str(buf[(x + i, y)].symbol());
                         }
                     }
-                    if word == "as" {
+                    if word == "re" {
                         typed_fg = Some(buf[(x, y)].fg);
                     }
                 }

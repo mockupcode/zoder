@@ -8,31 +8,6 @@ use uuid::Uuid;
 use crate::config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentMode {
-    Normal,
-    Plan,
-    Always,
-}
-
-impl AgentMode {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Normal => Self::Plan,
-            Self::Plan => Self::Always,
-            Self::Always => Self::Normal,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "Normal",
-            Self::Plan => "Plan",
-            Self::Always => "Always",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStatus {
     Running,
     Ok,
@@ -172,7 +147,6 @@ pub struct Session {
     pub created: DateTime<Local>,
     pub cwd: PathBuf,
     pub model: String,
-    pub mode: AgentMode,
     pub blocks: Vec<Block>,
     pub messages: Vec<ChatMessage>,
     pub todos: Vec<Todo>,
@@ -192,7 +166,6 @@ impl Session {
             created: now,
             cwd,
             model,
-            mode: AgentMode::Normal,
             blocks: Vec::new(),
             messages: Vec::new(),
             todos: Vec::new(),
@@ -204,10 +177,6 @@ impl Session {
 
     pub fn dir(&self) -> PathBuf {
         config::sessions_root(&self.cwd).join(&self.id)
-    }
-
-    pub fn plan_path(&self) -> PathBuf {
-        self.dir().join("plan.md")
     }
 
     pub fn transcript_path(&self) -> PathBuf {
@@ -413,18 +382,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_cycles_three_ways() {
-        assert_eq!(AgentMode::Normal.next(), AgentMode::Plan);
-        assert_eq!(AgentMode::Plan.next(), AgentMode::Always);
-        assert_eq!(AgentMode::Always.next(), AgentMode::Normal);
-    }
-
-    #[test]
     fn blank_session_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = Session::new(dir.path().to_path_buf(), "m".into());
         s.blocks.push(Block::Notice {
-            text: "mode → Plan".into(),
+            text: "notice only".into(),
         });
         s.save().unwrap();
         assert!(

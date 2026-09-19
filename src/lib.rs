@@ -79,7 +79,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             last_draw = Some(Instant::now());
         }
         if app.should_quit {
-            app.answer_perm(false);
+            if matches!(app.overlay, crate::app::Overlay::Question { .. }) {
+                app.answer_question("cancelled");
+            }
             break Ok(());
         }
         tokio::select! {

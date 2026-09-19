@@ -1,6 +1,3 @@
-use std::path::Path;
-use std::time::{Duration, Instant};
-
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -47,28 +44,9 @@ impl ChatCache {
     }
 }
 
-/// `plan.md` feeds the todos pane; throttle the read so drawing stays cheap.
-#[derive(Default)]
-pub struct PlanCache {
-    checked: Option<Instant>,
-    text: Option<String>,
-}
-
-const PLAN_TTL: Duration = Duration::from_millis(500);
 const PLACEHOLDER_KEY: u64 = 0xd0de_0bad_cafe_0001;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-impl PlanCache {
-    pub fn get(&mut self, path: &Path) -> Option<String> {
-        let fresh = self.checked.is_some_and(|t| t.elapsed() < PLAN_TTL);
-        if !fresh {
-            self.checked = Some(Instant::now());
-            self.text = std::fs::read_to_string(path).ok();
-        }
-        self.text.clone()
-    }
-}
 
 pub(super) fn draw_chat(frame: &mut Frame, app: &App, area: Rect, gap: Rect) {
     let th = app.theme;
@@ -554,9 +532,8 @@ fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
         .style(th.base());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let plan = app.plan_cache.borrow_mut().get(&app.session.plan_path());
     let mut lines = Vec::new();
-    if app.session.todos.is_empty() && plan.is_none() {
+    if app.session.todos.is_empty() {
         lines.push(Line::from(Span::styled("  no tasks yet", th.mute())));
     }
     for t in &app.session.todos {
@@ -572,19 +549,6 @@ fn draw_todos(frame: &mut Frame, app: &App, area: Rect) {
                 th.base(),
             ),
         ]));
-    }
-    if let Some(p) = plan {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" plan", th.mute())));
-        for row in p
-            .lines()
-            .take(inner.height.saturating_sub(lines.len() as u16 + 1) as usize)
-        {
-            lines.push(Line::from(Span::styled(
-                truncate_width(row, inner.width as usize),
-                th.dim(),
-            )));
-        }
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }

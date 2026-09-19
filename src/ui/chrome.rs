@@ -58,28 +58,25 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Prompt && matches!(app.overlay, Overlay::None);
     let border = th.prompt_border;
     let _ = focused;
-    let stash = if app.composer.stash.is_some() {
-        " · stashed"
-    } else {
-        ""
-    };
-    let qn = if app.queue.is_empty() {
-        String::new()
-    } else {
-        format!(" · queued {}", app.queue.len())
-    };
-    let mode_owned;
-    let mode: &str = match app.composer.kind {
-        DraftKind::Shell => "shell",
-        DraftKind::Chat => {
-            mode_owned = app.session.mode.label().to_lowercase();
-            &mode_owned
-        }
-    };
+    let mut bits: Vec<String> = Vec::new();
+    if matches!(app.composer.kind, DraftKind::Shell) {
+        bits.push("shell".into());
+    }
+    if app.composer.stash.is_some() {
+        bits.push("stash".into());
+    }
+    if !app.queue.is_empty() {
+        bits.push(format!("queued {}", app.queue.len()));
+    }
     let bottom = if app.running {
         Line::from(Span::styled(
-            format!(" {}{stash}{qn} ", app.spinner()),
+            format!(" {} ", app.spinner()),
             Style::default().fg(th.fg_dim).bg(th.bg),
+        ))
+    } else if bits.is_empty() {
+        Line::from(Span::styled(
+            format!(" {} ", app.session.model),
+            Style::default().fg(th.fg_mid).bg(th.bg),
         ))
     } else {
         Line::from(vec![
@@ -89,7 +86,7 @@ pub(super) fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled("·", Style::default().fg(th.fg_mute).bg(th.bg)),
             Span::styled(
-                format!(" {mode}{stash}{qn} ",),
+                format!(" {} ", bits.join(" · ")),
                 Style::default().fg(th.fg_dim).bg(th.bg),
             ),
         ])
@@ -186,7 +183,6 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             hint("Shift+Enter", "newline");
         }
     }
-    hint("Shift+Tab", "mode");
     hint("Ctrl+x", "shortcuts");
     frame.render_widget(Paragraph::new(Line::from(spans)).style(th.base()), inner);
 }

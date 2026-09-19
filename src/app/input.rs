@@ -6,7 +6,6 @@ use crossterm::event::{
 use ratatui::layout::Position;
 
 use super::{step_index, App, Focus, Overlay, Residue};
-use crate::session::AgentMode;
 use crate::slash;
 use crate::text::{csi_final, csi_param};
 
@@ -70,8 +69,6 @@ impl App {
     }
 
     pub(super) fn handle_global_or_main(&mut self, key: KeyEvent) {
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-
         if let Some(l) = ctrl_letter(&key) {
             match l {
                 'q' | 'd' => {
@@ -92,10 +89,6 @@ impl App {
                 }
                 't' => {
                     self.show_todos = !self.show_todos;
-                    return;
-                }
-                'o' => {
-                    self.cycle_always();
                     return;
                 }
                 'm' => {
@@ -145,7 +138,6 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Tab if shift => self.cycle_mode(),
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Focus::Prompt => Focus::Scrollback,
@@ -153,7 +145,6 @@ impl App {
                     Focus::Scrollback | Focus::Todos => Focus::Prompt,
                 };
             }
-            KeyCode::BackTab => self.cycle_mode(),
             KeyCode::Esc => self.on_esc(),
             KeyCode::Enter => self.on_enter(key.modifiers),
             KeyCode::Backspace => {
@@ -199,10 +190,6 @@ impl App {
                 self.scroll_transcript(-(page as i16));
             }
             KeyCode::Char(c) => {
-                if shift && c == '\t' {
-                    self.cycle_mode();
-                    return;
-                }
                 if c.is_control() || key.modifiers.contains(KeyModifiers::CONTROL) {
                     return;
                 }
@@ -275,20 +262,6 @@ impl App {
                 }
                 _ => {}
             },
-            Overlay::Permission { selected, .. } => match key.code {
-                KeyCode::Up | KeyCode::BackTab => *selected = selected.saturating_sub(1),
-                KeyCode::Down | KeyCode::Tab => {
-                    if *selected < 1 {
-                        *selected += 1;
-                    }
-                }
-                KeyCode::Char('1') | KeyCode::Enter if *selected == 0 => self.answer_perm(true),
-                KeyCode::Char('2') | KeyCode::Enter if *selected == 1 => self.answer_perm(false),
-                _ if matches!(ascii_char(&key), Some('y' | 'a')) => self.answer_perm(true),
-                _ if matches!(ascii_char(&key), Some('n' | 'd')) => self.answer_perm(false),
-                KeyCode::Esc => self.answer_perm(false),
-                _ => {}
-            },
             Overlay::Question {
                 options,
                 selected,
@@ -343,14 +316,6 @@ impl App {
                     }
                 }
             }
-        }
-    }
-
-    pub(crate) fn answer_perm(&mut self, allow: bool) {
-        if let Overlay::Permission { reply: Some(r), .. } =
-            std::mem::replace(&mut self.overlay, Overlay::None)
-        {
-            let _ = r.send(allow);
         }
     }
 
@@ -538,9 +503,7 @@ impl App {
         {
             let pos = Position::new(ev.column, ev.row);
             if self.close_hit.get().is_some_and(|r| r.contains(pos)) {
-                if matches!(self.overlay, Overlay::Permission { .. }) {
-                    self.answer_perm(false);
-                } else if matches!(self.overlay, Overlay::Question { .. }) {
+                if matches!(self.overlay, Overlay::Question { .. }) {
                     self.answer_question("cancelled");
                 } else {
                     self.close_overlay();
@@ -696,27 +659,6 @@ impl App {
     pub(super) fn fold_selected(&mut self, collapse: bool) {
         if let Some(b) = self.session.blocks.get_mut(self.selected_block) {
             b.set_folded(collapse);
-        }
-    }
-
-    pub(super) fn cycle_mode(&mut self) {
-        self.session.mode = self.session.mode.next();
-        self.note_mode(true);
-    }
-
-    pub(super) fn cycle_always(&mut self) {
-        self.session.mode = if self.session.mode == AgentMode::Always {
-            AgentMode::Normal
-        } else {
-            AgentMode::Always
-        };
-        self.note_mode(false);
-    }
-
-    fn note_mode(&mut self, save: bool) {
-        self.toast(format!("mode {}", self.session.mode.label()));
-        if save {
-            let _ = self.session.save();
         }
     }
 

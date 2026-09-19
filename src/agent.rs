@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ollama::Client;
-use crate::session::{AgentMode, ChatMessage, Session};
+use crate::session::{ChatMessage, Session};
 use crate::tools;
 
 /// How many model/tool rounds one turn may spend before it pauses. Agentic work
@@ -59,12 +59,6 @@ pub enum AgentEvent {
         output: String,
         ok: bool,
     },
-    NeedPermission {
-        id: String,
-        name: String,
-        detail: String,
-        reply: oneshot::Sender<bool>,
-    },
     NeedQuestion {
         prompt: String,
         hint: String,
@@ -86,11 +80,7 @@ pub enum AgentEvent {
 pub struct TurnInput {
     pub client: Client,
     pub messages: Vec<ChatMessage>,
-    pub mode: AgentMode,
     pub cwd: std::path::PathBuf,
-    pub session_dir: std::path::PathBuf,
-    pub plan_path: std::path::PathBuf,
-    pub always: bool,
     pub cancel: Arc<AtomicBool>,
     pub turn: u64,
 }
@@ -119,7 +109,6 @@ pub fn spawn(input: TurnInput, tx: Bus) -> tokio::task::JoinHandle<()> {
 async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessage>> {
     let tools_spec = tools::definitions();
     let mut guard = Session::new(input.cwd.clone(), input.client.model.clone());
-    guard.mode = input.mode;
     let turn = input.turn;
 
     let rounds = max_rounds();
@@ -206,26 +195,6 @@ async fn run_turn(mut input: TurnInput, tx: Bus) -> anyhow::Result<Vec<ChatMessa
     Ok(input.messages)
 }
 
-fn reject_tool(
-    messages: &mut Vec<ChatMessage>,
-    tx: &Bus,
-    turn: u64,
-    name: &str,
-    id: String,
-    msg: String,
-) {
-    messages.push(ChatMessage::tool(name, &msg));
-    emit(
-        tx,
-        turn,
-        AgentEvent::ToolEnd {
-            id,
-            output: msg,
-            ok: false,
-        },
-    );
-}
-
 async fn dispatch_call(
     input: &mut TurnInput,
     guard: &mut Session,
@@ -258,53 +227,6 @@ async fn dispatch_call(
         },
     );
 
-    if let Some(msg) = tools::plan_forbidden(input.mode, &name, &args, &input.plan_path) {
-        reject_tool(&mut input.messages, tx, turn, &name, id, msg);
-        return None;
-    }
-
-    let mut allow =
-        input.always || input.mode == AgentMode::Always || !tools::needs_permission(&name);
-    if !allow {
-        let (rtx, rrx) = oneshot::channel();
-        emit(
-            tx,
-            turn,
-            AgentEvent::NeedPermission {
-                id: id.clone(),
-                name: name.clone(),
-                detail: detail.clone(),
-                reply: rtx,
-            },
-        );
-        tokio::select! {
-            r = rrx => allow = r.unwrap_or(false),
-            _ = wait_cancel(&input.cancel) => {
-                reject_tool(
-                    &mut input.messages,
-                    tx,
-                    turn,
-                    &name,
-                    id,
-                    "cancelled".into(),
-                );
-                emit(tx, turn, AgentEvent::Status("cancelled".into()));
-                return Some(std::mem::take(&mut input.messages));
-            }
-        }
-    }
-    if !allow {
-        reject_tool(
-            &mut input.messages,
-            tx,
-            turn,
-            &name,
-            id,
-            "denied by user".into(),
-        );
-        return None;
-    }
-
     if input.cancel.load(Ordering::Relaxed) {
         emit(tx, turn, AgentEvent::Status("cancelled".into()));
         return Some(std::mem::take(&mut input.messages));
@@ -315,20 +237,6 @@ async fn dispatch_call(
         input.messages.push(ChatMessage::tool(&name, &output));
         emit(tx, turn, AgentEvent::ToolEnd { id, output, ok });
         return None;
-    }
-
-    if matches!(
-        tools::canonicalize(&name),
-        "write" | "edit" | "multiedit" | "lsp_replace_symbol"
-    ) {
-        let p = args
-            .get("file_path")
-            .or_else(|| args.get("path"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if p.ends_with("plan.md") {
-            std::fs::create_dir_all(&input.session_dir).ok();
-        }
     }
 
     let (ok, output) = tools::execute(guard, &name, &args, &input.cancel).await;
@@ -440,12 +348,8 @@ fn normalize_args(v: &Value) -> Value {
     }
 }
 
-pub fn system_prompt(
-    cwd: &std::path::Path,
-    mode: AgentMode,
-    plan_path: &std::path::Path,
-) -> String {
-    let mut s = format!(
+pub fn system_prompt(cwd: &std::path::Path) -> String {
+    format!(
         "You are Zoder, a terminal coding assistant. You work inside a full-screen TUI.\n\
          Workspace: {}\n\
          Be concrete. Prefer existing patterns in this repo. Do not invent files that do not exist — read them first.\n\
@@ -453,17 +357,7 @@ pub fn system_prompt(
          Reply in the user's language. Never print secrets.\n\
          After finishing, give a short summary of what changed.\n",
         cwd.display()
-    );
-    if mode == AgentMode::Plan {
-        s.push_str(&format!(
-            "\nPLAN MODE is on. Do not modify any file except {}.\n\
-             Explore with view/grep/glob/ls, then write a plan to that file with:\n\
-             - Context\n- Approach\n- Files to change\n- Reuse (existing functions)\n- Verification\n\
-             Do not implement until the user approves.\n",
-            plan_path.display()
-        ));
-    }
-    s
+    )
 }
 
 #[cfg(test)]

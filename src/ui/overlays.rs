@@ -31,12 +31,6 @@ pub(super) fn draw_overlay(frame: &mut Frame, app: &App) {
         ),
         Overlay::Sessions(s) => sessions(frame, app, s),
         Overlay::Models { items, selected } => models(frame, app, th, items, *selected),
-        Overlay::Permission {
-            name,
-            detail,
-            selected,
-            ..
-        } => permission(frame, app, th, name, detail, *selected),
         Overlay::Question {
             prompt,
             hint,
@@ -156,13 +150,11 @@ fn help(frame: &mut Frame, app: &App, th: Theme) {
         Line::from(""),
         Line::from("  enter            send (or queue while working)"),
         Line::from("  tab              prompt ↔ scrollback"),
-        Line::from("  shift+tab        Normal → Plan → Always"),
         Line::from("  esc              cancel a running turn"),
         Line::from("  ctrl+c           clear draft"),
         Line::from("  ctrl+n n         new session"),
         Line::from("  ctrl+r           resume a session"),
-        Line::from("  ctrl+t           todos / plan pane"),
-        Line::from("  ctrl+o           jump to Always"),
+        Line::from("  ctrl+t           todos pane"),
         Line::from("  ctrl+m           models (or multiline in the prompt)"),
         Line::from("  !                shell on an empty prompt"),
         Line::from("  /                commands"),
@@ -447,59 +439,6 @@ fn models(frame: &mut Frame, app: &App, th: Theme, items: &[String], selected: u
         56,
         body,
         &[("↑↓", "nav"), ("enter", "select"), ("esc", "close")],
-    );
-}
-
-fn permission(frame: &mut Frame, app: &App, th: Theme, name: &str, detail: &str, selected: usize) {
-    let allow = if selected == 0 {
-        th.selected()
-    } else {
-        th.success()
-    };
-    let deny = if selected == 1 {
-        th.selected()
-    } else {
-        th.error()
-    };
-    let body = vec![
-        (
-            Line::from(Span::styled(format!("  {name}"), th.accent_bold())),
-            false,
-        ),
-        (
-            Line::from(Span::styled(
-                format!("  {}", truncate_width(detail, 60)),
-                th.dim(),
-            )),
-            false,
-        ),
-        (Line::from(""), false),
-        (
-            Line::from(Span::styled(
-                "  this can change the workspace or run a command.",
-                th.mute(),
-            )),
-            false,
-        ),
-        (Line::from(""), false),
-        (
-            Line::from(vec![
-                Span::styled("  ", th.base()),
-                Span::styled(" 1 allow once ", allow),
-                Span::styled("   ", th.base()),
-                Span::styled(" 2 deny ", deny),
-            ]),
-            false,
-        ),
-    ];
-    paint_card(
-        frame,
-        app,
-        th,
-        "permission",
-        70,
-        body,
-        &[("1", "allow"), ("2", "deny"), ("esc", "deny")],
     );
 }
 

@@ -15,9 +15,6 @@ struct Cli {
     /// Model id on the active provider
     #[arg(long)]
     model: Option<String>,
-    /// Skip permission prompts
-    #[arg(long)]
-    yolo: bool,
     /// Resume the most recent session for this directory
     #[arg(short = 'c', long)]
     continue_last: bool,
@@ -44,9 +41,6 @@ async fn start() -> anyhow::Result<()> {
     }
     if let Some(model) = cli.model {
         cfg.set_model(model);
-    }
-    if cli.yolo {
-        cfg.always_approve = true;
     }
     let prompt = cli.prompt.join(" ");
     if !prompt.is_empty() {

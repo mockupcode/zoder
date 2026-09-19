@@ -15,8 +15,6 @@ pub struct Config {
     #[serde(default = "default_provider_id")]
     pub provider: String,
     #[serde(default)]
-    pub always_approve: bool,
-    #[serde(default)]
     pub providers: BTreeMap<String, Provider>,
 }
 
@@ -60,7 +58,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             provider: default_provider_id(),
-            always_approve: false,
             providers: fallback_providers(),
         }
     }
@@ -225,7 +222,6 @@ mod tests {
     fn parses_named_providers() {
         let raw = r#"
 provider = "home"
-always_approve = false
 
 [providers.home]
 kind = "ollama"
